@@ -1,4 +1,3 @@
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -17,8 +16,7 @@ module Codec.Compression.LZ4.Conduit
   , compress
   ) where
 
-import           Control.Exception (Exception)
-import           Control.Exception.Safe (MonadThrow, throwString, throwIO)
+import           Control.Exception.Safe (MonadThrow, throwString)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import           Data.ByteString (ByteString, packCStringLen)
 import           Data.ByteString.Unsafe (unsafePackCString, unsafeUseAsCStringLen)
@@ -26,19 +24,17 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import           Data.Conduit
 import           Data.Monoid ((<>))
-import           Data.Typeable (Typeable)
-import           Data.Word (Word32, Word64)
 import           Foreign.C.Types (CChar, CSize)
-import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
+import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, finalizeForeignPtr, withForeignPtr)
 import           Foreign.Marshal.Alloc (allocaBytes)
-import           Foreign.Ptr (Ptr, nullPtr, FunPtr, castPtr)
+import           Foreign.Ptr (Ptr, nullPtr, FunPtr)
 import           Foreign.Storable (Storable(..), poke)
 import qualified Language.C.Inline as C
 import qualified Language.C.Inline.Context as C
 import qualified Language.C.Inline.Unsafe as CUnsafe
 import           Text.RawString.QQ
 
-import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_preferences_t, lz4FrameTypesTable)
+import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
 
 #include "lz4frame.h"
 
@@ -49,167 +45,10 @@ C.include "<stdlib.h>"
 C.include "<stdio.h>"
 
 
-data Lz4FrameException = Lz4FormatException String
-  deriving (Eq, Ord, Show, Typeable)
-
-instance Exception Lz4FrameException
-
-
-data BlockSizeID
-  = LZ4F_default
-  | LZ4F_max64KB
-  | LZ4F_max256KB
-  | LZ4F_max1MB
-  | LZ4F_max4MB
-  deriving (Eq, Ord, Show)
-
-instance Storable BlockSizeID where
-  sizeOf _ = #{size LZ4F_blockSizeID_t}
-  alignment _ = #{alignment LZ4F_blockSizeID_t}
-  peek p = do
-    n <- peek (castPtr p :: Ptr #{type LZ4F_blockSizeID_t})
-    case n of
-      #{const LZ4F_default} -> return LZ4F_default
-      #{const LZ4F_max64KB} -> return LZ4F_max64KB
-      #{const LZ4F_max256KB} -> return LZ4F_max256KB
-      #{const LZ4F_max1MB} -> return LZ4F_max1MB
-      #{const LZ4F_max4MB} -> return LZ4F_max4MB
-      _ -> throwIO $ Lz4FormatException $ "lz4 instance Storable BlockSizeID: encountered unknown LZ4F_blockSizeID_t: " ++ show n
-  poke p i = poke (castPtr p :: Ptr #{type LZ4F_blockSizeID_t}) $ case i of
-    LZ4F_default -> #{const LZ4F_default}
-    LZ4F_max64KB -> #{const LZ4F_max64KB}
-    LZ4F_max256KB -> #{const LZ4F_max256KB}
-    LZ4F_max1MB -> #{const LZ4F_max1MB}
-    LZ4F_max4MB -> #{const LZ4F_max4MB}
-
-
-data BlockMode
-  = LZ4F_blockLinked
-  | LZ4F_blockIndependent
-  deriving (Eq, Ord, Show)
-
-instance Storable BlockMode where
-  sizeOf _ = #{size LZ4F_blockMode_t}
-  alignment _ = #{alignment LZ4F_blockMode_t}
-  peek p = do
-    n <- peek (castPtr p :: Ptr #{type LZ4F_blockMode_t})
-    case n of
-      #{const LZ4F_blockLinked } -> return LZ4F_blockLinked
-      #{const LZ4F_blockIndependent } -> return LZ4F_blockIndependent
-      _ -> throwIO $ Lz4FormatException $ "lz4 instance Storable BlockMode: encountered unknown LZ4F_blockMode_t: " ++ show n
-  poke p mode = poke (castPtr p :: Ptr #{type LZ4F_blockMode_t}) $ case mode of
-    LZ4F_blockLinked -> #{const LZ4F_blockLinked}
-    LZ4F_blockIndependent -> #{const LZ4F_blockIndependent}
-
-
-data ContentChecksum
-  = LZ4F_noContentChecksum
-  | LZ4F_contentChecksumEnabled
-  deriving (Eq, Ord, Show)
-
-instance Storable ContentChecksum where
-  sizeOf _ = #{size LZ4F_contentChecksum_t}
-  alignment _ = #{alignment LZ4F_contentChecksum_t}
-  peek p = do
-    n <- peek (castPtr p :: Ptr #{type LZ4F_contentChecksum_t})
-    case n of
-      #{const LZ4F_noContentChecksum } -> return LZ4F_noContentChecksum
-      #{const LZ4F_contentChecksumEnabled } -> return LZ4F_contentChecksumEnabled
-      _ -> throwIO $ Lz4FormatException $ "lz4 instance Storable ContentChecksum: encountered unknown LZ4F_contentChecksum_t: " ++ show n
-  poke p mode = poke (castPtr p :: Ptr #{type LZ4F_contentChecksum_t}) $ case mode of
-    LZ4F_noContentChecksum -> #{const LZ4F_noContentChecksum}
-    LZ4F_contentChecksumEnabled -> #{const LZ4F_contentChecksumEnabled}
-
-
-data FrameType
-  = LZ4F_frame
-  | LZ4F_skippableFrame
-  deriving (Eq, Ord, Show)
-
-instance Storable FrameType where
-  sizeOf _ = #{size LZ4F_frameType_t}
-  alignment _ = #{alignment LZ4F_frameType_t}
-  peek p = do
-    n <- peek (castPtr p :: Ptr #{type LZ4F_frameType_t})
-    case n of
-      #{const LZ4F_frame } -> return LZ4F_frame
-      #{const LZ4F_skippableFrame } -> return LZ4F_skippableFrame
-      _ -> throwIO $ Lz4FormatException $ "lz4 instance Storable FrameType: encountered unknown LZ4F_frameType_t: " ++ show n
-  poke p mode = poke (castPtr p :: Ptr #{type LZ4F_frameType_t}) $ case mode of
-    LZ4F_frame  -> #{const LZ4F_frame}
-    LZ4F_skippableFrame -> #{const LZ4F_skippableFrame}
-
-
-data FrameInfo = FrameInfo
-  { blockSizeID         :: BlockSizeID
-  , blockMode           :: BlockMode
-  , contentChecksumFlag :: ContentChecksum
-  , frameType           :: FrameType
-  , contentSize         :: Word64
-  }
-
-instance Storable FrameInfo where
-  sizeOf _ = #{size LZ4F_frameInfo_t}
-  alignment _ = #{alignment LZ4F_frameInfo_t}
-  peek p = do
-    blockSizeID <- #{peek LZ4F_frameInfo_t, blockSizeID} p
-    blockMode <- #{peek LZ4F_frameInfo_t, blockMode} p
-    contentChecksumFlag <- #{peek LZ4F_frameInfo_t, contentChecksumFlag} p
-    frameType <- #{peek LZ4F_frameInfo_t, frameType} p
-    contentSize <- #{peek LZ4F_frameInfo_t, contentSize} p
-    return $ FrameInfo
-      { blockSizeID
-      , blockMode
-      , contentChecksumFlag
-      , frameType
-      , contentSize
-      }
-  poke p frameInfo = do
-    #{poke LZ4F_frameInfo_t, blockSizeID} p $ blockSizeID frameInfo
-    #{poke LZ4F_frameInfo_t, blockMode} p $ blockMode frameInfo
-    #{poke LZ4F_frameInfo_t, contentChecksumFlag} p $ contentChecksumFlag frameInfo
-    #{poke LZ4F_frameInfo_t, frameType} p $ frameType frameInfo
-    #{poke LZ4F_frameInfo_t, contentSize} p $ contentSize frameInfo
-    -- Reserved fields must be 0 for forward compatibility,
-    -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L143
-    #{poke LZ4F_frameInfo_t, reserved[0]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_frameInfo_t, reserved[1]} p $ (0 :: #{type unsigned})
-
-
-data Preferences = Preferences
-  { frameInfo        :: FrameInfo
-  , compressionLevel :: Int
-  , autoFlush        :: Bool
-  }
-
-instance Storable Preferences where
-  sizeOf _ = #{size LZ4F_preferences_t}
-  alignment _ = #{alignment LZ4F_preferences_t}
-  peek p = do
-    frameInfo <- #{peek LZ4F_preferences_t, frameInfo} p
-    compressionLevel <- #{peek LZ4F_preferences_t, compressionLevel} p
-    autoFlush <- #{peek LZ4F_preferences_t, autoFlush} p
-    return $ Preferences
-      { frameInfo
-      , compressionLevel
-      , autoFlush
-      }
-  poke p preferences = do
-    #{poke LZ4F_preferences_t, frameInfo} p $ frameInfo preferences
-    #{poke LZ4F_preferences_t, compressionLevel} p $ compressionLevel preferences
-    #{poke LZ4F_preferences_t, autoFlush} p $ autoFlush preferences
-    -- Reserved fields must be 0 for forward compatibility,
-    -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L154
-    #{poke LZ4F_preferences_t, reserved[0]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_preferences_t, reserved[1]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_preferences_t, reserved[2]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_preferences_t, reserved[3]} p $ (0 :: #{type unsigned})
-
-
 newtype Lz4FrameContext = Lz4FrameContext { unLz4FrameContext :: ForeignPtr (Ptr LZ4F_cctx) }
   deriving (Eq, Ord, Show)
 
-newtype Lz4FramePreferences = Lz4FramePreferences { unLz4FramePreferences :: ForeignPtr LZ4F_preferences_t }
+newtype Lz4FramePreferencesPtr = Lz4FramePreferencesPtr { unLz4FramePreferencesPtr :: ForeignPtr Preferences }
   deriving (Eq, Ord, Show)
 
 
@@ -313,26 +152,20 @@ lz4DefaultPreferences =
     }
 
 
-lz4fCreatePreferences :: IO Lz4FramePreferences
-lz4fCreatePreferences = do
-  let _PREFERENCES_SIZE = [CUnsafe.pure| size_t { sizeof(LZ4F_preferences_t) } |]
-
-  prefsForeignPtr :: ForeignPtr LZ4F_preferences_t <- mallocForeignPtrBytes (fromIntegral _PREFERENCES_SIZE)
-  _ <- [C.block| void {
-    LZ4F_preferences_t lz4_preferences = {
-      { LZ4F_max256KB, LZ4F_blockLinked, LZ4F_noContentChecksum, LZ4F_frame, 0, { 0, 0 } },
-      0,   /* compression level */
-      0,   /* autoflush */
-      { 0, 0, 0, 0 },  /* reserved, must be set to 0 */
-    };
-    LZ4F_preferences_t* prefsPtr = $fptr-ptr:(LZ4F_preferences_t* prefsForeignPtr);
-    *prefsPtr = lz4_preferences;
-  } |]
-  return (Lz4FramePreferences prefsForeignPtr)
+newForeignPtr :: (Storable a) => a -> IO (ForeignPtr a)
+newForeignPtr x = do
+  fptr <- mallocForeignPtr
+  withForeignPtr fptr $ \ptr -> poke ptr x
+  return fptr
 
 
-lz4fCompressBegin :: Lz4FrameContext -> Lz4FramePreferences -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressBegin (Lz4FrameContext ctxForeignPtr) (Lz4FramePreferences prefsForeignPtr) headerBuf headerBufLen = do
+lz4fCreatePreferences :: IO Lz4FramePreferencesPtr
+lz4fCreatePreferences =
+  Lz4FramePreferencesPtr <$> newForeignPtr lz4DefaultPreferences
+
+
+lz4fCompressBegin :: Lz4FrameContext -> Lz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressBegin (Lz4FrameContext ctxForeignPtr) (Lz4FramePreferencesPtr prefsForeignPtr) headerBuf headerBufLen = do
   headerSize <- handleLz4Error [C.block| size_t {
 
     LZ4F_cctx* ctx = *$fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
@@ -345,8 +178,8 @@ lz4fCompressBegin (Lz4FrameContext ctxForeignPtr) (Lz4FramePreferences prefsFore
   return headerSize
 
 
-lz4fCompressBound :: CSize -> Lz4FramePreferences -> IO CSize
-lz4fCompressBound srcSize (Lz4FramePreferences prefsForeignPtr) = do
+lz4fCompressBound :: CSize -> Lz4FramePreferencesPtr -> IO CSize
+lz4fCompressBound srcSize (Lz4FramePreferencesPtr prefsForeignPtr) = do
   handleLz4Error [C.block| size_t {
     size_t err_or_frame_size = LZ4F_compressBound($(size_t srcSize), $fptr-ptr:(LZ4F_preferences_t* prefsForeignPtr));
     return err_or_frame_size;
@@ -460,7 +293,7 @@ compress = do
 
   -- Force resource release here to guarantee memory constantness
   -- of the conduit (and not rely on GC to do it "at some point in the future").
-  liftIO $ finalizeForeignPtr (unLz4FramePreferences prefs)
+  liftIO $ finalizeForeignPtr (unLz4FramePreferencesPtr prefs)
   liftIO $ finalizeForeignPtr (unLz4FrameContext ctx)
 
   liftIO $ putStrLn "done"
