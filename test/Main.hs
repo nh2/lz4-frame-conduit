@@ -2,7 +2,8 @@
 
 module Main (main) where
 
-import           Codec.Compression.LZ4.Conduit (compress)
+import           Codec.Compression.LZ4.Conduit (compress, bsChunksOf)
+import           Control.Monad (when)
 import           Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BSL
@@ -14,6 +15,9 @@ import           Data.List (intersperse)
 
 main :: IO ()
 main = do
+  when (bsChunksOf 3 "abc123def4567" /= ["abc", "123", "def", "456", "7"]) $
+    error "bsChunksOf failed"
+
   x <- runConduit $ yield "hellohellohello" .| compress .| CL.consume
   print x
 
