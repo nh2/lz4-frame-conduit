@@ -12,6 +12,7 @@ module Codec.Compression.LZ4.CTypes
   , FrameInfo(..)
   , Preferences(..)
   , LZ4F_cctx
+  , LZ4F_dctx
   , lz4FrameTypesTable
   ) where
 
@@ -186,10 +187,17 @@ instance Storable Preferences where
 
 
 data LZ4F_cctx
+data LZ4F_dctx
 
 
 lz4FrameTypesTable :: Map C.TypeSpecifier TH.TypeQ
 lz4FrameTypesTable = Map.fromList
   [ (C.TypeName "LZ4F_cctx", [t| LZ4F_cctx |])
+  , (C.TypeName "LZ4F_dctx", [t| LZ4F_dctx |])
+  , (C.TypeName "LZ4F_blockSizeID_t", [t| BlockSizeID |])
+  , (C.TypeName "LZ4F_blockMode_t", [t| BlockMode |])
+  , (C.TypeName "LZ4F_contentChecksum_t", [t| ContentChecksum |])
+  , (C.TypeName "LZ4F_frameInfo_t", [t| FrameInfo |])
+  , (C.TypeName "LZ4F_frameType_t", [t| FrameType |])
   , (C.TypeName "LZ4F_preferences_t", [t| Preferences |])
   ]

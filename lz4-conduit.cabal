@@ -30,6 +30,7 @@ library
                        Codec.Compression.LZ4.CTypes
   build-depends:       base >= 4.7 && < 5
                      , conduit
+                     , conduit-extra
                      , containers
                      , bytestring
                      , inline-c
@@ -45,6 +46,20 @@ library
                        src/Codec/Compression/LZ4/Conduit.c
   other-extensions:    TemplateHaskell
   ghc-options:         -Wall
+  default-language:    Haskell2010
+
+executable haskell-lz4c
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  build-depends:       base
+                     , lz4-conduit
+                     , bytestring
+                     , conduit
+                     , conduit-extra
+                     , optparse-applicative
+                     , resourcet
+                     , text
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
 test-suite lz4-conduit-test

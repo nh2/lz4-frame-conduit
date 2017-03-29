@@ -19,21 +19,27 @@ module Codec.Compression.LZ4.Conduit
   , compressYieldImmediately
   , compressWithOutBufferSize
 
+  , decompress
+
   , bsChunksOf
   ) where
 
 import           Control.Exception.Safe (MonadThrow, throwString)
-import           Control.Monad (foldM)
+import           Control.Monad (foldM, when)
 import           Control.Monad.IO.Class (MonadIO, liftIO)
+import           Data.Bits (testBit)
 import           Data.ByteString (ByteString, packCStringLen)
 import           Data.ByteString.Unsafe (unsafePackCString, unsafeUseAsCStringLen)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy as BSL
 import           Data.Conduit
+import qualified Data.Conduit.Binary as CB
 import           Data.Monoid ((<>))
 import           Foreign.C.Types (CChar, CSize)
 import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
-import           Foreign.Marshal.Alloc (allocaBytes)
+import           Foreign.Marshal.Alloc (alloca, allocaBytes)
+import           Foreign.Marshal.Utils (with)
 import           Foreign.Ptr (Ptr, nullPtr, FunPtr, plusPtr)
 import           Foreign.Storable (Storable(..), poke)
 import           GHC.Stack (HasCallStack)
@@ -42,7 +48,7 @@ import qualified Language.C.Inline.Context as C
 import qualified Language.C.Inline.Unsafe as CUnsafe
 import           Text.RawString.QQ
 
-import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
+import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
 
 #include "lz4frame.h"
 
@@ -53,10 +59,13 @@ C.include "<stdlib.h>"
 C.include "<stdio.h>"
 
 
-newtype Lz4FrameContext = Lz4FrameContext { unLz4FrameContext :: ForeignPtr (Ptr LZ4F_cctx) }
+newtype Lz4FrameCompressionContext = Lz4FrameCompressionContext { unLz4FrameCompressionContext :: ForeignPtr (Ptr LZ4F_cctx) }
   deriving (Eq, Ord, Show)
 
 newtype Lz4FramePreferencesPtr = Lz4FramePreferencesPtr { unLz4FramePreferencesPtr :: ForeignPtr Preferences }
+  deriving (Eq, Ord, Show)
+
+newtype Lz4FrameDecompressionContext = Lz4FrameDecompressionContext { unLz4FrameDecompressionContext :: ForeignPtr (Ptr LZ4F_dctx) }
   deriving (Eq, Ord, Show)
 
 
@@ -79,7 +88,7 @@ handleLz4Error f = do
 
 
 C.verbatim [r|
-void haskell_lz4_freeContext(LZ4F_cctx** ctxPtr)
+void haskell_lz4_freeCompressionContext(LZ4F_cctx** ctxPtr)
 {
   // We know ctxPtr can be resolved because it was created with
   // mallocForeignPtr, so it is always pointing to something valid
@@ -106,7 +115,7 @@ void haskell_lz4_freeContext(LZ4F_cctx** ctxPtr)
 }
 |]
 
-foreign import ccall "&haskell_lz4_freeContext" haskell_lz4_freeContext :: FunPtr (Ptr (Ptr LZ4F_cctx) -> IO ())
+foreign import ccall "&haskell_lz4_freeCompressionContext" haskell_lz4_freeCompressionContext :: FunPtr (Ptr (Ptr LZ4F_cctx) -> IO ())
 
 -- TODO Performance:
 --      Write a version of `compress` that emits ByteStrings of known
@@ -123,8 +132,8 @@ foreign import ccall "&haskell_lz4_freeContext" haskell_lz4_freeContext :: FunPt
 -- TODO Try enabling checksums, then corrupt a bit and see if lz4c detects it.
 
 
-lz4fCreateContext :: (HasCallStack) => IO Lz4FrameContext
-lz4fCreateContext = do
+lz4fCreateCompressonContext :: (HasCallStack) => IO Lz4FrameCompressionContext
+lz4fCreateCompressonContext = do
   ctxForeignPtr :: ForeignPtr (Ptr LZ4F_cctx) <- mallocForeignPtr
   -- Note [Initialize LZ4 context pointer to NULL]:
   -- We explicitly set it to NULL so that in the finalizer we know
@@ -135,14 +144,14 @@ lz4fCreateContext = do
   -- to ensure there cannot be a time where the context was created
   -- but not finalizer is attached (receiving an async exception at
   -- that time would make us leak memory).
-  addForeignPtrFinalizer haskell_lz4_freeContext ctxForeignPtr
+  addForeignPtrFinalizer haskell_lz4_freeCompressionContext ctxForeignPtr
 
   _ <- handleLz4Error [C.block| size_t {
     LZ4F_cctx** ctxPtr = $fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
     LZ4F_errorCode_t err = LZ4F_createCompressionContext(ctxPtr, LZ4F_VERSION);
     return err;
   } |]
-  return (Lz4FrameContext ctxForeignPtr)
+  return (Lz4FrameCompressionContext ctxForeignPtr)
 
 
 lz4DefaultPreferences :: Preferences
@@ -172,8 +181,8 @@ lz4fCreatePreferences =
   Lz4FramePreferencesPtr <$> newForeignPtr lz4DefaultPreferences
 
 
-lz4fCompressBegin :: (HasCallStack) => Lz4FrameContext -> Lz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressBegin (Lz4FrameContext ctxForeignPtr) (Lz4FramePreferencesPtr prefsForeignPtr) headerBuf headerBufLen = do
+lz4fCompressBegin :: (HasCallStack) => Lz4FrameCompressionContext -> Lz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressBegin (Lz4FrameCompressionContext ctxForeignPtr) (Lz4FramePreferencesPtr prefsForeignPtr) headerBuf headerBufLen = do
   headerSize <- handleLz4Error [C.block| size_t {
 
     LZ4F_cctx* ctx = *$fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
@@ -194,8 +203,8 @@ lz4fCompressBound srcSize (Lz4FramePreferencesPtr prefsForeignPtr) = do
   } |]
 
 
-lz4fCompressUpdate :: (HasCallStack) => Lz4FrameContext -> Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressUpdate (Lz4FrameContext ctxForeignPtr) destBuf destBufLen srcBuf srcBufLen = do
+lz4fCompressUpdate :: (HasCallStack) => Lz4FrameCompressionContext -> Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressUpdate (Lz4FrameCompressionContext ctxForeignPtr) destBuf destBufLen srcBuf srcBufLen = do
   -- TODO allow passing in cOptPtr instead of NULL.
   written <- handleLz4Error [C.block| size_t {
 
@@ -207,8 +216,8 @@ lz4fCompressUpdate (Lz4FrameContext ctxForeignPtr) destBuf destBufLen srcBuf src
   return written
 
 
-lz4fCompressEnd :: (HasCallStack) => Lz4FrameContext -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressEnd (Lz4FrameContext ctxForeignPtr) footerBuf footerBufLen = do
+lz4fCompressEnd :: (HasCallStack) => Lz4FrameCompressionContext -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressEnd (Lz4FrameCompressionContext ctxForeignPtr) footerBuf footerBufLen = do
   -- TODO allow passing in cOptPtr instead of NULL.
   footerWritten <- handleLz4Error [C.block| size_t {
     LZ4F_cctx* ctx = *$fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
@@ -241,7 +250,7 @@ compress = compressWithOutBufferSize 0
 -- when the lz4 frame library produces outputs).
 compressYieldImmediately :: (MonadIO m, MonadThrow m) => Conduit ByteString m ByteString
 compressYieldImmediately = do
-  ctx <- liftIO lz4fCreateContext
+  ctx <- liftIO lz4fCreateCompressonContext
   prefs <- liftIO lz4fCreatePreferences
 
   let _LZ4F_HEADER_SIZE_MAX = #{const LZ4F_HEADER_SIZE_MAX}
@@ -307,7 +316,7 @@ compressYieldImmediately = do
   -- Force resource release here to guarantee memory constantness
   -- of the conduit (and not rely on GC to do it "at some point in the future").
   liftIO $ finalizeForeignPtr (unLz4FramePreferencesPtr prefs)
-  liftIO $ finalizeForeignPtr (unLz4FrameContext ctx)
+  liftIO $ finalizeForeignPtr (unLz4FrameCompressionContext ctx)
 
 
 bsChunksOf :: Int -> ByteString -> [ByteString]
@@ -341,7 +350,7 @@ bsChunksOf chunkSize bs
 -- fast default.
 compressWithOutBufferSize :: forall m . (MonadIO m, MonadThrow m) => CSize -> Conduit ByteString m ByteString
 compressWithOutBufferSize bufferSize = do
-  ctx <- liftIO lz4fCreateContext
+  ctx <- liftIO lz4fCreateCompressonContext
   prefs <- liftIO lz4fCreatePreferences
 
   -- We split any incoming ByteString into chunks of this size, so that
@@ -404,4 +413,141 @@ compressWithOutBufferSize bufferSize = do
   -- of the conduit (and not rely on GC to do it "at some point in the future").
   liftIO $ finalizeForeignPtr outBuf
   liftIO $ finalizeForeignPtr (unLz4FramePreferencesPtr prefs)
-  liftIO $ finalizeForeignPtr (unLz4FrameContext ctx)
+  liftIO $ finalizeForeignPtr (unLz4FrameCompressionContext ctx)
+
+
+-- All notes that apply to `haskell_lz4_freeCompressionContext` apply
+-- here as well.
+C.verbatim [r|
+void haskell_lz4_freeDecompressionContext(LZ4F_dctx** ctxPtr)
+{
+  LZ4F_dctx* ctx = *ctxPtr;
+  if (ctx != NULL)
+  {
+    size_t err = LZ4F_freeDecompressionContext(ctx);
+    if (LZ4F_isError(err))
+    {
+      fprintf(stderr, "LZ4F_freeDecompressionContext failed: %s\n", LZ4F_getErrorName(err));
+      exit(1);
+    }
+  }
+}
+|]
+
+foreign import ccall "&haskell_lz4_freeDecompressionContext" haskell_lz4_freeDecompressionContext :: FunPtr (Ptr (Ptr LZ4F_dctx) -> IO ())
+
+
+lz4fCreateDecompressonContext :: (HasCallStack) => IO Lz4FrameDecompressionContext
+lz4fCreateDecompressonContext = do
+  -- All notes that apply to `lz4fCreateCompressonContext` apply here
+  -- as well.
+  ctxForeignPtr :: ForeignPtr (Ptr LZ4F_dctx) <- mallocForeignPtr
+  withForeignPtr ctxForeignPtr $ \ptr -> poke ptr nullPtr
+
+  addForeignPtrFinalizer haskell_lz4_freeDecompressionContext ctxForeignPtr
+
+  _ <- handleLz4Error [C.block| size_t {
+    LZ4F_dctx** ctxPtr = $fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
+    LZ4F_errorCode_t err = LZ4F_createDecompressionContext(ctxPtr, LZ4F_VERSION);
+    return err;
+  } |]
+  return (Lz4FrameDecompressionContext ctxForeignPtr)
+
+
+lz4fGetFrameInfo :: (HasCallStack) => Lz4FrameDecompressionContext -> Ptr FrameInfo -> Ptr CChar -> Ptr CSize -> IO CSize
+lz4fGetFrameInfo (Lz4FrameDecompressionContext ctxForeignPtr) frameInfoPtr srcBuffer srcSizePtr = do
+
+  decompressSizeHint <- handleLz4Error [C.block| size_t {
+    LZ4F_dctx* ctxPtr = *$fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
+    LZ4F_errorCode_t err_or_decompressSizeHint = LZ4F_getFrameInfo(ctxPtr, $(LZ4F_frameInfo_t* frameInfoPtr), $(char* srcBuffer), $(size_t* srcSizePtr));
+    return err_or_decompressSizeHint;
+  } |]
+  return decompressSizeHint
+
+
+lz4fDecompress :: (HasCallStack) => Lz4FrameDecompressionContext -> Ptr CChar -> Ptr CSize -> Ptr CChar -> Ptr CSize -> IO CSize
+lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr srcBuffer srcSizePtr = do
+  -- TODO allow passing in dOptPtr instead of NULL.
+
+  decompressSizeHint <- handleLz4Error [C.block| size_t {
+    LZ4F_dctx* ctxPtr = *$fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
+    LZ4F_errorCode_t err_or_decompressSizeHint = LZ4F_decompress(ctxPtr, $(char* dstBuffer), $(size_t* dstSizePtr), $(char* srcBuffer), $(size_t* srcSizePtr), NULL);
+    return err_or_decompressSizeHint;
+  } |]
+  return decompressSizeHint
+
+
+decompress :: (MonadIO m, MonadThrow m) => Conduit ByteString m ByteString
+decompress = do
+  ctx <- liftIO lz4fCreateDecompressonContext
+
+  -- OK, now here it gets a bit ugly.
+  -- The lz4frame library provides no function with which we can
+  -- determine how large the header is.
+  -- It depends on the "Content Size" bit in the "FLG" Byte (first
+  -- Byte of the frame descriptor, just after the 4 Byte magic number).
+  -- As a solution, we `await` the first 5 Bytes, look at the relevant
+  -- bit in the FLG Byte and thus decide how many more bytes to await
+  -- for the header.
+  -- Is ugly because ideally we would rely only on the lz4frame API
+  -- and not on the spec of the frame format, but we have no other
+  -- choice in this case.
+
+  first5Bytes <- CB.take 5
+  when (BSL.length first5Bytes /= 5) $ do
+    throwString $ "lz4 decompress error: not enough bytes for header; expected 5, got " ++ show (BSL.length first5Bytes)
+
+  let byteFLG = BSL.index first5Bytes 4
+  let contentSizeBit = testBit byteFLG 3
+
+  let numRemainingHeaderBytes
+        | contentSizeBit = 2 + 8
+        | otherwise      = 2
+
+  remainingHeaderBytes <- CB.take numRemainingHeaderBytes
+
+  let headerBs = BSL.toStrict $ BSL.concat [first5Bytes, remainingHeaderBytes]
+
+  headerDecompressSizeHint <- liftIO $ alloca $ \frameInfoPtr -> do
+    unsafeUseAsCStringLen headerBs $ \(headerBsPtr, headerBsLen) -> do
+      with (fromIntegral headerBsLen :: CSize) $ \headerBsLenPtr -> do
+        lz4fGetFrameInfo ctx frameInfoPtr headerBsPtr headerBsLenPtr
+
+
+  let loopSingleBs decompressSizeHint bs = do
+        (outBs, srcRead, newDecompressSizeHint) <- liftIO $
+          unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
+            let outBufSize = max decompressSizeHint (16 * 1024) -- TODO check why decompressSizeHint is always 4
+            allocaBytes (fromIntegral outBufSize) $ \dstBuffer -> do
+              with outBufSize $ \dstSizePtr -> do
+                with (fromIntegral srcSize :: CSize) $ \srcSizePtr -> do
+                  newDecompressSizeHint <-
+                    lz4fDecompress ctx dstBuffer dstSizePtr srcBuffer srcSizePtr
+                  srcRead <- peek srcSizePtr
+                  dstWritten <- peek dstSizePtr
+                  outBs <- packCStringLen (dstBuffer, fromIntegral dstWritten)
+                  return (outBs, srcRead, newDecompressSizeHint)
+
+        yield outBs
+
+        let srcReadInt = fromIntegral srcRead
+        if
+          | srcReadInt < BS.length bs -> loopSingleBs newDecompressSizeHint (BS.drop srcReadInt bs)
+          | srcReadInt == BS.length bs -> return newDecompressSizeHint
+          | otherwise -> error $ "lz4 decompress: assertion failed: srcRead < BS.length bs: " ++ show (srcRead, BS.length bs)
+
+  let loop decompressSizeHint =
+        await >>= \case
+          Nothing -> throwString $ "lz4 decompress error: stream ended before EndMark"
+          Just bs -> do
+            newDecompressSizeHint <- loopSingleBs decompressSizeHint bs
+
+            -- When a frame is fully decoded, LZ4F_decompress returns 0 (no more data expected),
+            -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L324
+            when (newDecompressSizeHint /= 0) $ loop newDecompressSizeHint
+
+  loop headerDecompressSizeHint
+
+  -- Force resource release here to guarantee memory constantness
+  -- of the conduit (and not rely on GC to do it "at some point in the future").
+  liftIO $ finalizeForeignPtr (unLz4FrameDecompressionContext ctx)
