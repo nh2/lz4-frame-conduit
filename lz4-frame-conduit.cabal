@@ -1,8 +1,8 @@
-name:                lz4-conduit
+name:                lz4-frame-conduit
 version:             0.1.0.0
--- synopsis:
--- description:
-homepage:            https://github.com/nh2/lz4-conduit#readme
+synopsis:            Conduit implementing the official LZ4 frame straming format
+description:         Conduit implementing the official LZ4 frame straming format
+homepage:            https://github.com/nh2/lz4-frame-conduit#readme
 license:             MIT
 license-file:        LICENSE
 author:              Niklas Hambüchen
@@ -52,7 +52,7 @@ executable haskell-lz4c
   hs-source-dirs:      app
   main-is:             Main.hs
   build-depends:       base
-                     , lz4-conduit
+                     , lz4-frame-conduit
                      , bytestring
                      , conduit
                      , conduit-extra
@@ -62,12 +62,12 @@ executable haskell-lz4c
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
-test-suite lz4-conduit-test
+test-suite lz4-frame-conduit-test
   type:                exitcode-stdio-1.0
   hs-source-dirs:      test
   main-is:             Main.hs
   build-depends:       base
-                     , lz4-conduit
+                     , lz4-frame-conduit
                      , bytestring
                      , conduit
                      , conduit-extra
@@ -77,4 +77,4 @@ test-suite lz4-conduit-test
 
 source-repository head
   type:     git
-  location: https://github.com/nh2/lz4-conduit
+  location: https://github.com/nh2/lz4-frame-conduit
