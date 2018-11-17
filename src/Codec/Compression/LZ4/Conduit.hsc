@@ -90,7 +90,7 @@ handleLz4Error f = do
 C.verbatim [r|
 void haskell_lz4_freeCompressionContext(LZ4F_cctx** ctxPtr)
 {
-  // We know ctxPtr can be resolved because it was created with
+  // We know ctxPtr can be dereferenced because it was created with
   // mallocForeignPtr, so it is always pointing to something valid
   // during the lifetime of the ForeignPtr (and this function is
   // a finalizer function, which is called only at the very end
@@ -124,13 +124,30 @@ foreign import ccall "&haskell_lz4_freeCompressionContext" haskell_lz4_freeCompr
 --      (e.g using `unsafePackMallocCString` or equivalent).
 --      We currently don't do that (instead, use allocaBytes + copying packCStringLen)
 --      to ensure that the ByteStrings generated are as compact as possible
---      (for the case that `written < size`), as in the current `compress`
---      directly yields the outputs of LZ4F_compressUpdate()
---      (unless they re of 0 length when they are buffered in the context
+--      (for the case that `written < size`), since the current `compress`
+--      conduit directly yields the outputs of LZ4F_compressUpdate()
+--      (unless they are of 0 length when they are buffered in the context
 --      tmp buffer).
 
 -- TODO Try enabling checksums, then corrupt a bit and see if lz4c detects it.
 
+-- TODO Add `with*` style bracketed functions for creating the
+--      LZ4F_createCompressionContext and Lz4FramePreferencesPtr
+--      for prompt resource release,
+--      in addition to the GC'd variants below.
+--      This would replace our use of `finalizeForeignPtr` in the conduit.
+--      `finalizeForeignPtr` seems almost as good, but note that it
+--      doesn't guarantee prompt resource release on exceptions;
+--      a `with*` style function that uses `bracket` does.
+--      However, it isn't clear yet which one would be faster
+--      (what the cost of `mask` is compared to foreign pointer finalizers).
+--      Also note that prompt freeing has side benefits,
+--      such as reduced malloc() fragmentation (the closer malloc()
+--      and free() are to each other, the smaller is the chance to
+--      have malloc()s on top of the our malloc() in the heap,
+--      thus the smaller the chance that we cannot decrease the
+--      heap pointer upon free() (because "mallocs on top" render
+--      heap memory unreturnable to the OS; memory fragmentation).
 
 lz4fCreateCompressonContext :: (HasCallStack) => IO Lz4FrameCompressionContext
 lz4fCreateCompressonContext = do
@@ -145,6 +162,9 @@ lz4fCreateCompressonContext = do
   -- but not finalizer is attached (receiving an async exception at
   -- that time would make us leak memory).
   addForeignPtrFinalizer haskell_lz4_freeCompressionContext ctxForeignPtr
+  -- TODO The whole idea above is to avoid `mask`.
+  --      But we should check if `addForeignPtrFinalizer` itself is actually
+  --      async exception safe; if not, this is pointless.
 
   _ <- handleLz4Error [C.block| size_t {
     LZ4F_cctx** ctxPtr = $fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
@@ -335,8 +355,8 @@ bsChunksOf chunkSize bs
 -- * Incoming ByteStrings are processed in blocks of 16 KB, allowing us
 --   to use a single intermediate output buffer through the lifetime of
 --   the conduit.
--- * The `bufferSize` of the output buffer can be increased by the caller
---   up to the given `bufferSize`, to reduce the number of small
+-- * The `bufferSize` of the output buffer can controlled by the caller
+--   via the `bufferSize` argument, to reduce the number of small
 --   `ByteString`s being `yield`ed (especially in the case that the
 --   input data compresses very well, e.g. a stream of zeros).
 --
@@ -346,7 +366,7 @@ bsChunksOf chunkSize bs
 -- as the eventual output buffer size.
 --
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
--- size be the minimum required to compress 16 KB inputs and is still a
+-- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
 compressWithOutBufferSize :: forall m . (MonadIO m, MonadThrow m) => CSize -> Conduit ByteString m ByteString
 compressWithOutBufferSize bufferSize = do
@@ -370,6 +390,8 @@ compressWithOutBufferSize bufferSize = do
         await >>= \case
           Nothing -> do
             let offset = fromIntegral $ outBufferSize - remainingCapacity
+            -- TODO Ensure that footer actually fits into `remainingCapacity`,
+            --      otherwise yield first
             footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) remainingCapacity
             let outBufLen = outBufferSize - remainingCapacity + footerWritten
 
@@ -518,6 +540,7 @@ decompress = do
         (outBs, srcRead, newDecompressSizeHint) <- liftIO $
           unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
             let outBufSize = max decompressSizeHint (16 * 1024) -- TODO check why decompressSizeHint is always 4
+            -- TODO Performance: Reuse this buffer across multiple `loopSingleBs`
             allocaBytes (fromIntegral outBufSize) $ \dstBuffer -> do
               with outBufSize $ \dstSizePtr -> do
                 with (fromIntegral srcSize :: CSize) $ \srcSizePtr -> do
