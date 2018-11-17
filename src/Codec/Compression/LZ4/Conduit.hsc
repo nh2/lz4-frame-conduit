@@ -24,9 +24,10 @@ module Codec.Compression.LZ4.Conduit
   , bsChunksOf
   ) where
 
-import           Control.Exception.Safe (MonadThrow, throwString)
+import           UnliftIO.Exception (throwString)
 import           Control.Monad (foldM, when)
-import           Control.Monad.IO.Class (MonadIO, liftIO)
+import           Control.Monad.IO.Unlift (MonadUnliftIO)
+import           Control.Monad.IO.Class (liftIO)
 import           Data.Bits (testBit)
 import           Data.ByteString (ByteString, packCStringLen)
 import           Data.ByteString.Unsafe (unsafePackCString, unsafeUseAsCStringLen)
@@ -69,7 +70,7 @@ newtype Lz4FrameDecompressionContext = Lz4FrameDecompressionContext { unLz4Frame
   deriving (Eq, Ord, Show)
 
 
-handleLz4Error :: (HasCallStack, MonadIO m, MonadThrow m) => IO CSize -> m CSize
+handleLz4Error :: (HasCallStack, MonadUnliftIO m) => IO CSize -> m CSize
 handleLz4Error f = do
   ret <- liftIO f
   -- We use an unsafe foreign call here so that it's fast (it cannot block).
@@ -257,7 +258,7 @@ lz4fCompressEnd (Lz4FrameCompressionContext ctxForeignPtr) footerBuf footerBufLe
 -- buffer is large enough.
 
 
-compress :: (MonadIO m, MonadThrow m) => Conduit ByteString m ByteString
+compress :: (MonadUnliftIO m) => ConduitT ByteString ByteString m ()
 compress = compressWithOutBufferSize 0
 
 
@@ -268,7 +269,7 @@ compress = compressWithOutBufferSize 0
 --
 -- Note that this does not imply ZL4 frame autoFlush (which affects
 -- when the lz4 frame library produces outputs).
-compressYieldImmediately :: (MonadIO m, MonadThrow m) => Conduit ByteString m ByteString
+compressYieldImmediately :: (MonadUnliftIO m) => ConduitT ByteString ByteString m ()
 compressYieldImmediately = do
   ctx <- liftIO lz4fCreateCompressonContext
   prefs <- liftIO lz4fCreatePreferences
@@ -368,7 +369,7 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
-compressWithOutBufferSize :: forall m . (MonadIO m, MonadThrow m) => CSize -> Conduit ByteString m ByteString
+compressWithOutBufferSize :: forall m . (MonadUnliftIO m) => CSize -> ConduitT ByteString ByteString m ()
 compressWithOutBufferSize bufferSize = do
   ctx <- liftIO lz4fCreateCompressonContext
   prefs <- liftIO lz4fCreatePreferences
@@ -499,7 +500,7 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
   return decompressSizeHint
 
 
-decompress :: (MonadIO m, MonadThrow m) => Conduit ByteString m ByteString
+decompress :: (MonadUnliftIO m) => ConduitT ByteString ByteString m ()
 decompress = do
   ctx <- liftIO lz4fCreateDecompressionContext
 

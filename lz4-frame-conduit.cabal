@@ -36,7 +36,8 @@ library
                      , inline-c
                      , raw-strings-qq
                      , template-haskell
-                     , safe-exceptions
+                     , unliftio
+                     , unliftio-core
   build-tools:         hsc2hs
   include-dirs:        lz4/lib
   c-sources:           lz4/lib/lz4.c
