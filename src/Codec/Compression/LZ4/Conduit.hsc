@@ -459,8 +459,8 @@ void haskell_lz4_freeDecompressionContext(LZ4F_dctx** ctxPtr)
 foreign import ccall "&haskell_lz4_freeDecompressionContext" haskell_lz4_freeDecompressionContext :: FunPtr (Ptr (Ptr LZ4F_dctx) -> IO ())
 
 
-lz4fCreateDecompressonContext :: (HasCallStack) => IO Lz4FrameDecompressionContext
-lz4fCreateDecompressonContext = do
+lz4fCreateDecompressionContext :: (HasCallStack) => IO Lz4FrameDecompressionContext
+lz4fCreateDecompressionContext = do
   -- All notes that apply to `lz4fCreateCompressonContext` apply here
   -- as well.
   ctxForeignPtr :: ForeignPtr (Ptr LZ4F_dctx) <- mallocForeignPtr
@@ -501,7 +501,7 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
 
 decompress :: (MonadIO m, MonadThrow m) => Conduit ByteString m ByteString
 decompress = do
-  ctx <- liftIO lz4fCreateDecompressonContext
+  ctx <- liftIO lz4fCreateDecompressionContext
 
   -- OK, now here it gets a bit ugly.
   -- The lz4frame library provides no function with which we can
