@@ -71,6 +71,7 @@ test-suite lz4-frame-conduit-test
                      , bytestring
                      , conduit
                      , conduit-extra
+                     , hspec
                      , resourcet
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010

@@ -4,40 +4,64 @@ module Main (main) where
 
 import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf)
 import           Control.Monad (when)
-import           Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import           Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import           Data.Conduit
-import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
+import qualified Data.Conduit.Process as CP
 import           Data.List (intersperse)
+import           Test.Hspec
+
+
+runCompressToLZ4 :: ConduitT () ByteString IO () -> IO ByteString
+runCompressToLZ4 source = do
+  (_, result, _) <- CP.sourceCmdWithStreams "lz4 -d" (source .| compress) CL.consume CL.consume
+  return $ BS.concat result
+
+runLZ4ToDecompress :: ConduitT () ByteString IO () -> IO ByteString
+runLZ4ToDecompress source = do
+  (_, result, _) <- CP.sourceCmdWithStreams "lz4 -c" source (decompress .| CL.consume) CL.consume
+  return $ BS.concat result
 
 main :: IO ()
 main = do
   when (bsChunksOf 3 "abc123def4567" /= ["abc", "123", "def", "456", "7"]) $
     error "bsChunksOf failed"
 
-  x <- runConduit $ yield "hellohellohello" .| compress .| CL.consume
-  print x
+  let prepare :: [BSL.ByteString] -> [ByteString]
+      prepare strings = BSL.toChunks $ BSL.concat $ intersperse " " $ ["BEGIN"] ++ strings ++ ["END"]
 
-  let compressToFile :: FilePath -> Source (ResourceT IO) ByteString -> IO ()
-      compressToFile path source =
-        runResourceT $ runConduit $ source .| compress .| CB.sinkFileCautious path
+  hspec $ do
+    describe "Compression" $ do
+      it "compresses simple string" $ do
+        let string = "hellohellohellohello"
+        actual <- runCompressToLZ4 (yield string)
+        actual `shouldBe` string
 
-  compressToFile "out.lz4" $ yield "hellohellohello"
+      it "compresses 100000 integers" $ do
+        let strings = prepare $ map (BSL8.pack . show) [1..100000 :: Int]
+        actual <- runCompressToLZ4 (CL.sourceList strings)
+        actual `shouldBe` (BS.concat strings)
 
-  compressToFile "outbig1.lz4" $
-    CL.sourceList $ BSL.toChunks $ BSL8.pack $
-      concat $ intersperse " " $ ["BEGIN"] ++ map show [1..100000 :: Int] ++ ["END"]
+      it "compresses 100000 strings" $ do
+        let strings = prepare $ replicate 100000 "hello" 
+        actual <- runCompressToLZ4 (CL.sourceList strings)
+        actual `shouldBe` (BS.concat strings)
 
-  compressToFile "outbig2.lz4" $
-    CL.sourceList $ BSL.toChunks $ BSL8.pack $
-      concat $ intersperse " " $ replicate 100000 "hello"
+    describe "Decompression" $ do
+      it "decompresses simple string" $ do
+        let string = "hellohellohellohello"
+        actual <- runLZ4ToDecompress (yield string)
+        actual `shouldBe` string
 
-  d <- runConduit $ yield "hellohellohello" .| compress .| decompress .| CL.consume
-  print d
+      it "decompresses 100000 integers" $ do
+        let strings = prepare $ map (BSL8.pack . show) [1..100000 :: Int]
+        actual <- runLZ4ToDecompress (CL.sourceList strings)
+        actual `shouldBe` (BS.concat strings)
 
-  runResourceT $ runConduit $ CB.sourceFile "out.lz4" .| decompress .| CB.sinkFileCautious "out.lz4.decompressed"
-  runResourceT $ runConduit $ CB.sourceFile "outbig1.lz4" .| decompress .| CB.sinkFileCautious "outbig1.lz4.decompressed"
-  runResourceT $ runConduit $ CB.sourceFile "outbig2.lz4" .| decompress .| CB.sinkFileCautious "outbig2.lz4.decompressed"
+      it "decompresses 100000 strings" $ do
+        let strings = prepare $ replicate 100000 "hello" 
+        actual <- runLZ4ToDecompress (CL.sourceList strings)
+        actual `shouldBe` (BS.concat strings)
