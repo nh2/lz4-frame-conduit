@@ -1,8 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
 module Codec.Compression.LZ4.Conduit
   ( Lz4FrameException(..)
@@ -28,6 +30,7 @@ import           UnliftIO.Exception (throwString)
 import           Control.Monad (foldM, when)
 import           Control.Monad.IO.Unlift (MonadUnliftIO)
 import           Control.Monad.IO.Class (liftIO)
+import           Control.Monad.Trans.Resource (MonadResource)
 import           Data.Bits (testBit)
 import           Data.ByteString (ByteString, packCStringLen)
 import           Data.ByteString.Unsafe (unsafePackCString, unsafeUseAsCStringLen)
@@ -39,7 +42,8 @@ import qualified Data.Conduit.Binary as CB
 import           Data.Monoid ((<>))
 import           Foreign.C.Types (CChar, CSize)
 import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
-import           Foreign.Marshal.Alloc (alloca, allocaBytes)
+import           Foreign.Marshal.Alloc (alloca, allocaBytes, malloc, free)
+import           Foreign.Marshal.Array (mallocArray, reallocArray)
 import           Foreign.Marshal.Utils (with)
 import           Foreign.Ptr (Ptr, nullPtr, FunPtr, plusPtr)
 import           Foreign.Storable (Storable(..), poke)
@@ -514,7 +518,7 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
   return decompressSizeHint
 
 
-decompress :: (MonadUnliftIO m) => ConduitT ByteString ByteString m ()
+decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 decompress = do
   ctx <- liftIO lz4fCreateDecompressionContext
 
@@ -550,13 +554,42 @@ decompress = do
       with (fromIntegral headerBsLen :: CSize) $ \headerBsLenPtr -> do
         lz4fGetFrameInfo ctx frameInfoPtr headerBsPtr headerBsLenPtr
 
+  let dstBufferSizeDefault :: CSize
+      dstBufferSizeDefault = 16 * 1024
 
-  let loopSingleBs decompressSizeHint bs = do
-        (outBs, srcRead, newDecompressSizeHint) <- liftIO $
-          unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
-            let outBufSize = max decompressSizeHint (16 * 1024) -- TODO check why decompressSizeHint is always 4
-            -- TODO Performance: Reuse this buffer across multiple `loopSingleBs`
-            allocaBytes (fromIntegral outBufSize) $ \dstBuffer -> do
+  bracketP
+    (do
+      dstBufferPtr <- malloc
+      dstBufferSizePtr <- malloc
+      poke dstBufferPtr =<< mallocArray (fromIntegral dstBufferSizeDefault)
+      poke dstBufferSizePtr dstBufferSizeDefault
+      return (dstBufferPtr, dstBufferSizePtr)
+    )
+    (\(dstBufferPtr, dstBufferSizePtr) -> do
+      free =<< peek dstBufferPtr
+      free dstBufferPtr
+      free dstBufferSizePtr
+    )
+    $ \(dstBufferPtr, dstBufferSizePtr) -> do
+
+    let ensureDstBufferSize :: CSize -> IO (Ptr CChar)
+        ensureDstBufferSize size = do
+          dstBufferSize <- peek dstBufferSizePtr
+          when (size > dstBufferSize) $ do
+            dstBuffer <- peek dstBufferPtr
+            poke dstBufferPtr =<< reallocArray dstBuffer (fromIntegral size)
+            poke dstBufferSizePtr size
+          peek dstBufferPtr
+
+    let loopSingleBs :: CSize -> ByteString -> _
+        loopSingleBs decompressSizeHint bs = do
+          (outBs, srcRead, newDecompressSizeHint) <- liftIO $
+            unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
+              let outBufSize = max decompressSizeHint dstBufferSizeDefault -- TODO check why decompressSizeHint is always 4
+
+              -- Increase destination buffer size if necessary.
+              dstBuffer <- ensureDstBufferSize outBufSize
+
               with outBufSize $ \dstSizePtr -> do
                 with (fromIntegral srcSize :: CSize) $ \srcSizePtr -> do
                   newDecompressSizeHint <-
@@ -566,26 +599,26 @@ decompress = do
                   outBs <- packCStringLen (dstBuffer, fromIntegral dstWritten)
                   return (outBs, srcRead, newDecompressSizeHint)
 
-        yield outBs
+          yield outBs
 
-        let srcReadInt = fromIntegral srcRead
-        if
-          | srcReadInt < BS.length bs -> loopSingleBs newDecompressSizeHint (BS.drop srcReadInt bs)
-          | srcReadInt == BS.length bs -> return newDecompressSizeHint
-          | otherwise -> error $ "lz4 decompress: assertion failed: srcRead < BS.length bs: " ++ show (srcRead, BS.length bs)
+          let srcReadInt = fromIntegral srcRead
+          if
+            | srcReadInt < BS.length bs -> loopSingleBs newDecompressSizeHint (BS.drop srcReadInt bs)
+            | srcReadInt == BS.length bs -> return newDecompressSizeHint
+            | otherwise -> error $ "lz4 decompress: assertion failed: srcRead < BS.length bs: " ++ show (srcRead, BS.length bs)
 
-  let loop decompressSizeHint =
-        await >>= \case
-          Nothing -> throwString $ "lz4 decompress error: stream ended before EndMark"
-          Just bs -> do
-            newDecompressSizeHint <- loopSingleBs decompressSizeHint bs
+    let loop decompressSizeHint =
+          await >>= \case
+            Nothing -> throwString $ "lz4 decompress error: stream ended before EndMark"
+            Just bs -> do
+              newDecompressSizeHint <- loopSingleBs decompressSizeHint bs
 
-            -- When a frame is fully decoded, LZ4F_decompress returns 0 (no more data expected),
-            -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L324
-            when (newDecompressSizeHint /= 0) $ loop newDecompressSizeHint
+              -- When a frame is fully decoded, LZ4F_decompress returns 0 (no more data expected),
+              -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L324
+              when (newDecompressSizeHint /= 0) $ loop newDecompressSizeHint
 
-  loop headerDecompressSizeHint
+    loop headerDecompressSizeHint
 
-  -- Force resource release here to guarantee memory constantness
-  -- of the conduit (and not rely on GC to do it "at some point in the future").
-  liftIO $ finalizeForeignPtr (unLz4FrameDecompressionContext ctx)
+    -- Force resource release here to guarantee memory constantness
+    -- of the conduit (and not rely on GC to do it "at some point in the future").
+    liftIO $ finalizeForeignPtr (unLz4FrameDecompressionContext ctx)

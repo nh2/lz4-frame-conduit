@@ -35,6 +35,7 @@ library
                      , bytestring
                      , inline-c
                      , raw-strings-qq
+                     , resourcet
                      , template-haskell
                      , unliftio
                      , unliftio-core
@@ -73,6 +74,7 @@ test-suite lz4-frame-conduit-test
                      , conduit-extra
                      , hspec
                      , resourcet
+                     , unliftio-core
                      , QuickCheck
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010

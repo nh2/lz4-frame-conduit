@@ -3,6 +3,8 @@
 module Main (main) where
 
 import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf)
+import           Control.Monad.IO.Unlift (MonadUnliftIO)
+import           Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -18,13 +20,14 @@ import qualified Test.QuickCheck.Monadic as QCM
 
 
 
-runCompressToLZ4 :: ConduitT () ByteString IO () -> IO ByteString
-runCompressToLZ4 source = do
+runCompressToLZ4 :: (MonadUnliftIO m) => ConduitT () ByteString (ResourceT m) () -> m ByteString
+runCompressToLZ4 source = runResourceT $ do
+
   (_, result, _) <- CP.sourceCmdWithStreams "lz4 -d" (source .| compress) CL.consume CL.consume
   return $ BS.concat result
 
-runLZ4ToDecompress :: ConduitT () ByteString IO () -> IO ByteString
-runLZ4ToDecompress source = do
+runLZ4ToDecompress :: (MonadUnliftIO m) => ConduitT () ByteString (ResourceT m) () -> m ByteString
+runLZ4ToDecompress source = runResourceT $ do
   (_, result, _) <- CP.sourceCmdWithStreams "lz4 -c" source (decompress .| CL.consume) CL.consume
   return $ BS.concat result
 
@@ -50,7 +53,7 @@ main = do
         actual `shouldBe` (BS.concat strings)
 
       it "compresses 100000 strings" $ do
-        let strings = prepare $ replicate 100000 "hello" 
+        let strings = prepare $ replicate 100000 "hello"
         actual <- runCompressToLZ4 (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
 
@@ -66,7 +69,7 @@ main = do
         actual `shouldBe` (BS.concat strings)
 
       it "decompresses 100000 strings" $ do
-        let strings = prepare $ replicate 100000 "hello" 
+        let strings = prepare $ replicate 100000 "hello"
         actual <- runLZ4ToDecompress (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
 
@@ -74,5 +77,5 @@ main = do
       modifyMaxSize (const 10000) $ it "compress and decompress arbitrary strings"$
         QC.property $ \string -> QCM.monadicIO $ do
           let bs = BSL.toChunks $ BSL8.pack string
-          actual <- QCM.run (runConduit $ CL.sourceList bs .| compress .| decompress .| CL.consume)
+          actual <- QCM.run (runConduitRes $ CL.sourceList bs .| compress .| decompress .| CL.consume)
           QCM.assert(BS.concat bs == BS.concat actual)
