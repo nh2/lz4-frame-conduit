@@ -384,20 +384,34 @@ compressWithOutBufferSize bufferSize = do
 
   outBuf <- liftIO $ mallocForeignPtrBytes (fromIntegral outBufferSize)
   let withOutBuf f = liftIO $ withForeignPtr outBuf f
+  let yieldOutBuf outBufLen = do
+        outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
+        yield outBs
 
   headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
+
+  let writeFooterAndYield remainingCapacity = do
+        let offset = fromIntegral $ outBufferSize - remainingCapacity
+        footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) remainingCapacity
+        let outBufLen = outBufferSize - remainingCapacity + footerWritten
+        yieldOutBuf outBufLen
 
   let loop remainingCapacity = do
         await >>= \case
           Nothing -> do
-            let offset = fromIntegral $ outBufferSize - remainingCapacity
-            -- TODO Ensure that footer actually fits into `remainingCapacity`,
-            --      otherwise yield first
-            footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) remainingCapacity
-            let outBufLen = outBufferSize - remainingCapacity + footerWritten
+            -- Done, write footer.
 
-            outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
-            yield outBs
+            -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
+            -- see docs of LZ4F_compressBound() for that.
+            footerSize <- liftIO $ lz4fCompressBound 0 prefs
+
+            if remainingCapacity >= footerSize
+              then do
+                writeFooterAndYield remainingCapacity
+              else do
+                -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
+                yieldOutBuf (outBufferSize - remainingCapacity)
+                writeFooterAndYield outBufferSize
 
           Just bs -> do
             let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
