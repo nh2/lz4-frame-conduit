@@ -24,9 +24,21 @@ module Codec.Compression.LZ4.Conduit
   , decompress
 
   , bsChunksOf
+
+  -- * Internals
+  , Lz4FrameCompressionContext(..)
+  , ScopedLz4FrameCompressionContext(..)
+  , ScopedLz4FramePreferencesPtr(..)
+  , Lz4FramePreferencesPtr(..)
+  , Lz4FrameDecompressionContext(..)
+  , lz4fCreatePreferences
+  , lz4fCreateCompressonContext
+  , lz4fCreateDecompressionContext
+  , withScopedLz4fPreferences
+  , withScopedLz4fCompressionContext
   ) where
 
-import           UnliftIO.Exception (throwString)
+import           UnliftIO.Exception (throwString, bracket)
 import           Control.Monad (foldM, when)
 import           Control.Monad.IO.Unlift (MonadUnliftIO)
 import           Control.Monad.IO.Class (liftIO)
@@ -44,7 +56,7 @@ import           Foreign.C.Types (CChar, CSize)
 import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
 import           Foreign.Marshal.Alloc (alloca, allocaBytes, malloc, free)
 import           Foreign.Marshal.Array (mallocArray, reallocArray)
-import           Foreign.Marshal.Utils (with)
+import           Foreign.Marshal.Utils (with, new)
 import           Foreign.Ptr (Ptr, nullPtr, FunPtr, plusPtr)
 import           Foreign.Storable (Storable(..), poke)
 import           GHC.Stack (HasCallStack)
@@ -65,6 +77,12 @@ C.include "<stdio.h>"
 
 
 newtype Lz4FrameCompressionContext = Lz4FrameCompressionContext { unLz4FrameCompressionContext :: ForeignPtr (Ptr LZ4F_cctx) }
+  deriving (Eq, Ord, Show)
+
+newtype ScopedLz4FrameCompressionContext = ScopedLz4FrameCompressionContext { unScopedLz4FrameCompressionContext :: Ptr LZ4F_cctx }
+  deriving (Eq, Ord, Show)
+
+newtype ScopedLz4FramePreferencesPtr = ScopedLz4FramePreferencesPtr { unScopedLz4FramePreferencesPtr :: Ptr Preferences }
   deriving (Eq, Ord, Show)
 
 newtype Lz4FramePreferencesPtr = Lz4FramePreferencesPtr { unLz4FramePreferencesPtr :: ForeignPtr Preferences }
@@ -122,6 +140,29 @@ void haskell_lz4_freeCompressionContext(LZ4F_cctx** ctxPtr)
 
 foreign import ccall "&haskell_lz4_freeCompressionContext" haskell_lz4_freeCompressionContext :: FunPtr (Ptr (Ptr LZ4F_cctx) -> IO ())
 
+
+allocateLz4fScopedCompressionContext :: IO ScopedLz4FrameCompressionContext
+allocateLz4fScopedCompressionContext = do
+  alloca $ \(ctxPtrPtr :: Ptr (Ptr LZ4F_cctx)) -> do
+    _ <- handleLz4Error [C.block| size_t {
+      LZ4F_cctx** ctxPtr = $(LZ4F_cctx** ctxPtrPtr);
+      LZ4F_errorCode_t err = LZ4F_createCompressionContext(ctxPtr, LZ4F_VERSION);
+      return err;
+    } |]
+    ctxPtr <- peek ctxPtrPtr
+    return (ScopedLz4FrameCompressionContext ctxPtr)
+
+
+freeLz4ScopedCompressionContext :: ScopedLz4FrameCompressionContext -> IO ()
+freeLz4ScopedCompressionContext (ScopedLz4FrameCompressionContext ctxPtr) = do
+  _ <- handleLz4Error
+    [C.block| size_t {
+      return LZ4F_freeCompressionContext($(LZ4F_cctx* ctxPtr));
+    } |]
+  return ()
+
+
+
 -- TODO Performance:
 --      Write a version of `compress` that emits ByteStrings of known
 --      constant length. That will allow us to do compression in a zero-copy
@@ -153,6 +194,18 @@ foreign import ccall "&haskell_lz4_freeCompressionContext" haskell_lz4_freeCompr
 --      thus the smaller the chance that we cannot decrease the
 --      heap pointer upon free() (because "mallocs on top" render
 --      heap memory unreturnable to the OS; memory fragmentation).
+
+
+-- TODO Turn the above TODO into documentation
+
+
+withScopedLz4fCompressionContext :: (HasCallStack) => (ScopedLz4FrameCompressionContext -> IO a) -> IO a
+withScopedLz4fCompressionContext f =
+  bracket
+    allocateLz4fScopedCompressionContext
+    freeLz4ScopedCompressionContext
+    f
+
 
 lz4fCreateCompressonContext :: (HasCallStack) => IO Lz4FrameCompressionContext
 lz4fCreateCompressonContext = do
@@ -206,48 +259,50 @@ lz4fCreatePreferences =
   Lz4FramePreferencesPtr <$> newForeignPtr lz4DefaultPreferences
 
 
-lz4fCompressBegin :: (HasCallStack) => Lz4FrameCompressionContext -> Lz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressBegin (Lz4FrameCompressionContext ctxForeignPtr) (Lz4FramePreferencesPtr prefsForeignPtr) headerBuf headerBufLen = do
+withScopedLz4fPreferences :: (HasCallStack) => (ScopedLz4FramePreferencesPtr -> IO a) -> IO a
+withScopedLz4fPreferences f =
+  bracket
+    (ScopedLz4FramePreferencesPtr <$> new lz4DefaultPreferences)
+    (\(ScopedLz4FramePreferencesPtr ptr) -> free ptr)
+    f
+
+
+lz4fCompressBegin :: (HasCallStack) => ScopedLz4FrameCompressionContext -> ScopedLz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressBegin (ScopedLz4FrameCompressionContext ctx) (ScopedLz4FramePreferencesPtr prefsPtr) headerBuf headerBufLen = do
   headerSize <- handleLz4Error [C.block| size_t {
 
-    LZ4F_cctx* ctx = *$fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
-    LZ4F_preferences_t* lz4_preferences_ptr = $fptr-ptr:(LZ4F_preferences_t* prefsForeignPtr);
+    LZ4F_preferences_t* lz4_preferences_ptr = $(LZ4F_preferences_t* prefsPtr);
 
-    size_t err_or_headerSize = LZ4F_compressBegin(ctx, $(char* headerBuf), $(size_t headerBufLen), lz4_preferences_ptr);
+    size_t err_or_headerSize = LZ4F_compressBegin($(LZ4F_cctx* ctx), $(char* headerBuf), $(size_t headerBufLen), lz4_preferences_ptr);
     return err_or_headerSize;
   } |]
 
   return headerSize
 
 
-lz4fCompressBound :: (HasCallStack) => CSize -> Lz4FramePreferencesPtr -> IO CSize
-lz4fCompressBound srcSize (Lz4FramePreferencesPtr prefsForeignPtr) = do
+lz4fCompressBound :: (HasCallStack) => CSize -> ScopedLz4FramePreferencesPtr -> IO CSize
+lz4fCompressBound srcSize (ScopedLz4FramePreferencesPtr prefsPtr) = do
   handleLz4Error [C.block| size_t {
-    size_t err_or_frame_size = LZ4F_compressBound($(size_t srcSize), $fptr-ptr:(LZ4F_preferences_t* prefsForeignPtr));
+    size_t err_or_frame_size = LZ4F_compressBound($(size_t srcSize), $(LZ4F_preferences_t* prefsPtr));
     return err_or_frame_size;
   } |]
 
 
-lz4fCompressUpdate :: (HasCallStack) => Lz4FrameCompressionContext -> Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressUpdate (Lz4FrameCompressionContext ctxForeignPtr) destBuf destBufLen srcBuf srcBufLen = do
+lz4fCompressUpdate :: (HasCallStack) => ScopedLz4FrameCompressionContext -> Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressUpdate (ScopedLz4FrameCompressionContext ctx) destBuf destBufLen srcBuf srcBufLen = do
   -- TODO allow passing in cOptPtr instead of NULL.
   written <- handleLz4Error [C.block| size_t {
-
-    LZ4F_cctx* ctx = *$fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
-
-    size_t err_or_written = LZ4F_compressUpdate(ctx, $(char* destBuf), $(size_t destBufLen), $(char* srcBuf), $(size_t srcBufLen), NULL);
+    size_t err_or_written = LZ4F_compressUpdate($(LZ4F_cctx* ctx), $(char* destBuf), $(size_t destBufLen), $(char* srcBuf), $(size_t srcBufLen), NULL);
     return err_or_written;
   } |]
   return written
 
 
-lz4fCompressEnd :: (HasCallStack) => Lz4FrameCompressionContext -> Ptr CChar -> CSize -> IO CSize
-lz4fCompressEnd (Lz4FrameCompressionContext ctxForeignPtr) footerBuf footerBufLen = do
+lz4fCompressEnd :: (HasCallStack) => ScopedLz4FrameCompressionContext -> Ptr CChar -> CSize -> IO CSize
+lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = do
   -- TODO allow passing in cOptPtr instead of NULL.
   footerWritten <- handleLz4Error [C.block| size_t {
-    LZ4F_cctx* ctx = *$fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
-
-    size_t err_or_footerWritten = LZ4F_compressEnd(ctx, $(char* footerBuf), $(size_t footerBufLen), NULL);
+    size_t err_or_footerWritten = LZ4F_compressEnd($(LZ4F_cctx* ctx), $(char* footerBuf), $(size_t footerBufLen), NULL);
     return err_or_footerWritten;
   } |]
   return footerWritten
@@ -262,8 +317,25 @@ lz4fCompressEnd (Lz4FrameCompressionContext ctxForeignPtr) footerBuf footerBufLe
 -- buffer is large enough.
 
 
-compress :: (MonadUnliftIO m) => ConduitT ByteString ByteString m ()
+compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 compress = compressWithOutBufferSize 0
+
+
+withLz4CtxAndPrefsConduit ::
+  (MonadUnliftIO m, MonadResource m)
+  => ((ScopedLz4FrameCompressionContext, ScopedLz4FramePreferencesPtr) -> ConduitT i o m r)
+  -> ConduitT i o m r
+withLz4CtxAndPrefsConduit f = bracketP
+  (do
+    ctx <- allocateLz4fScopedCompressionContext
+    prefPtr <- new lz4DefaultPreferences
+    return (ctx, ScopedLz4FramePreferencesPtr prefPtr)
+  )
+  (\(ctx, ScopedLz4FramePreferencesPtr prefPtr) -> do
+    freeLz4ScopedCompressionContext ctx
+    free prefPtr
+  )
+  f
 
 
 -- | Compresses the incoming stream of ByteStrings with the lz4 frame format.
@@ -273,75 +345,68 @@ compress = compressWithOutBufferSize 0
 --
 -- Note that this does not imply ZL4 frame autoFlush (which affects
 -- when the lz4 frame library produces outputs).
-compressYieldImmediately :: (MonadUnliftIO m) => ConduitT ByteString ByteString m ()
-compressYieldImmediately = do
-  ctx <- liftIO lz4fCreateCompressonContext
-  prefs <- liftIO lz4fCreatePreferences
+compressYieldImmediately :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
+compressYieldImmediately =
+  withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
+    let _LZ4F_HEADER_SIZE_MAX = #{const LZ4F_HEADER_SIZE_MAX}
 
-  let _LZ4F_HEADER_SIZE_MAX = #{const LZ4F_HEADER_SIZE_MAX}
+    -- Header
 
-  -- Header
+    headerBs <- liftIO $ allocaBytes (fromIntegral _LZ4F_HEADER_SIZE_MAX) $ \headerBuf -> do
+      headerSize <- lz4fCompressBegin ctx prefs headerBuf _LZ4F_HEADER_SIZE_MAX
+      packCStringLen (headerBuf, fromIntegral headerSize)
 
-  headerBs <- liftIO $ allocaBytes (fromIntegral _LZ4F_HEADER_SIZE_MAX) $ \headerBuf -> do
-    headerSize <- lz4fCompressBegin ctx prefs headerBuf _LZ4F_HEADER_SIZE_MAX
-    packCStringLen (headerBuf, fromIntegral headerSize)
+    yield headerBs
 
-  yield headerBs
+    -- Chunks
 
-  -- Chunks
-
-  awaitForever $ \bs -> do
+    awaitForever $ \bs -> do
 
 
-    m'outBs <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
-      let bsLenSize = fromIntegral bsLen
+      m'outBs <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
+        let bsLenSize = fromIntegral bsLen
 
-      size <- lz4fCompressBound bsLenSize prefs
+        size <- lz4fCompressBound bsLenSize prefs
 
-      -- TODO Performance: Check if reusing this buffer obtained with `allocaBytes`
-      --      makes it faster.
-      --      LZ4F_compressBound() always returns a number > the block size (e.g. 256K),
-      --      even when the input size passed to it is just a few bytes.
-      --      As a result, we allocate at least a full block size each time
-      --      (and `allocaBytes` calls `malloc()`), but not using most of it.
-      --      Worse, with autoflush=0, most small inputs go into the context buffer,
-      --      in which case the `allocaBytes` is completely wasted.
-      --      This could be avoided by keeping the last `allocaBytes` buffer around,
-      --      and reusing it if it is big enough for the number returned by
-      --      LZ4F_compressUpdate() next time.
-      --      That should avoid most allocations in the case that we `await` lots of
-      --      small ByteStrings.
-      m'outBs <- liftIO $ allocaBytes (fromIntegral size) $ \buf -> do
+        -- TODO Performance: Check if reusing this buffer obtained with `allocaBytes`
+        --      makes it faster.
+        --      LZ4F_compressBound() always returns a number > the block size (e.g. 256K),
+        --      even when the input size passed to it is just a few bytes.
+        --      As a result, we allocate at least a full block size each time
+        --      (and `allocaBytes` calls `malloc()`), but not using most of it.
+        --      Worse, with autoflush=0, most small inputs go into the context buffer,
+        --      in which case the `allocaBytes` is completely wasted.
+        --      This could be avoided by keeping the last `allocaBytes` buffer around,
+        --      and reusing it if it is big enough for the number returned by
+        --      LZ4F_compressUpdate() next time.
+        --      That should avoid most allocations in the case that we `await` lots of
+        --      small ByteStrings.
+        m'outBs <- liftIO $ allocaBytes (fromIntegral size) $ \buf -> do
 
-        -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks].
-        written <- lz4fCompressUpdate ctx buf size bsPtr bsLenSize
+          -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks].
+          written <- lz4fCompressUpdate ctx buf size bsPtr bsLenSize
 
-        if written == 0 -- everything fit into the context buffer, no new compressed data was emitted
-          then return Nothing
-          else Just <$> packCStringLen (buf, fromIntegral written)
+          if written == 0 -- everything fit into the context buffer, no new compressed data was emitted
+            then return Nothing
+            else Just <$> packCStringLen (buf, fromIntegral written)
 
-      return m'outBs
+        return m'outBs
 
-    case m'outBs of
-      Nothing -> return ()
-      Just outBs -> yield outBs
+      case m'outBs of
+        Nothing -> return ()
+        Just outBs -> yield outBs
 
-  -- Footer
+    -- Footer
 
-  -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
-  -- see docs of LZ4F_compressBound() for that.
-  footerSize <- liftIO $ lz4fCompressBound 0 prefs
+    -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
+    -- see docs of LZ4F_compressBound() for that.
+    footerSize <- liftIO $ lz4fCompressBound 0 prefs
 
-  footerBs <- liftIO $ allocaBytes (fromIntegral footerSize) $ \footerBuf -> do
-    footerWritten <- lz4fCompressEnd ctx footerBuf footerSize
-    packCStringLen (footerBuf, fromIntegral footerWritten)
+    footerBs <- liftIO $ allocaBytes (fromIntegral footerSize) $ \footerBuf -> do
+      footerWritten <- lz4fCompressEnd ctx footerBuf footerSize
+      packCStringLen (footerBuf, fromIntegral footerWritten)
 
-  yield footerBs
-
-  -- Force resource release here to guarantee memory constantness
-  -- of the conduit (and not rely on GC to do it "at some point in the future").
-  liftIO $ finalizeForeignPtr (unLz4FramePreferencesPtr prefs)
-  liftIO $ finalizeForeignPtr (unLz4FrameCompressionContext ctx)
+    yield footerBs
 
 
 bsChunksOf :: Int -> ByteString -> [ByteString]
@@ -373,88 +438,83 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
-compressWithOutBufferSize :: forall m . (MonadUnliftIO m) => CSize -> ConduitT ByteString ByteString m ()
-compressWithOutBufferSize bufferSize = do
-  ctx <- liftIO lz4fCreateCompressonContext
-  prefs <- liftIO lz4fCreatePreferences
+compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT ByteString ByteString m ()
+compressWithOutBufferSize bufferSize =
+  withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
 
-  -- We split any incoming ByteString into chunks of this size, so that
-  -- we can pass this size to `lz4fCompressBound` once and reuse a buffer
-  -- of constant size for the compression.
-  let bsInChunkSize = 16*1024
+    -- We split any incoming ByteString into chunks of this size, so that
+    -- we can pass this size to `lz4fCompressBound` once and reuse a buffer
+    -- of constant size for the compression.
+    let bsInChunkSize = 16*1024
 
-  compressBound <- liftIO $ lz4fCompressBound (#{const LZ4F_HEADER_SIZE_MAX} + bsInChunkSize) prefs
-  let outBufferSize = max bufferSize compressBound
+    compressBound <- liftIO $ lz4fCompressBound (#{const LZ4F_HEADER_SIZE_MAX} + bsInChunkSize) prefs
+    let outBufferSize = max bufferSize compressBound
 
-  outBuf <- liftIO $ mallocForeignPtrBytes (fromIntegral outBufferSize)
-  let withOutBuf f = liftIO $ withForeignPtr outBuf f
-  let yieldOutBuf outBufLen = do
-        outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
-        yield outBs
+    outBuf <- liftIO $ mallocForeignPtrBytes (fromIntegral outBufferSize)
+    let withOutBuf f = liftIO $ withForeignPtr outBuf f
+    let yieldOutBuf outBufLen = do
+          outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
+          yield outBs
 
-  headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
+    headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
 
-  let writeFooterAndYield remainingCapacity = do
-        let offset = fromIntegral $ outBufferSize - remainingCapacity
-        footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) remainingCapacity
-        let outBufLen = outBufferSize - remainingCapacity + footerWritten
-        yieldOutBuf outBufLen
+    let writeFooterAndYield remainingCapacity = do
+          let offset = fromIntegral $ outBufferSize - remainingCapacity
+          footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) remainingCapacity
+          let outBufLen = outBufferSize - remainingCapacity + footerWritten
+          yieldOutBuf outBufLen
 
-  let loop remainingCapacity = do
-        await >>= \case
-          Nothing -> do
-            -- Done, write footer.
+    let loop remainingCapacity = do
+          await >>= \case
+            Nothing -> do
+              -- Done, write footer.
 
-            -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
-            -- see docs of LZ4F_compressBound() for that.
-            footerSize <- liftIO $ lz4fCompressBound 0 prefs
+              -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
+              -- see docs of LZ4F_compressBound() for that.
+              footerSize <- liftIO $ lz4fCompressBound 0 prefs
 
-            if remainingCapacity >= footerSize
-              then do
-                writeFooterAndYield remainingCapacity
-              else do
-                -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
-                yieldOutBuf (outBufferSize - remainingCapacity)
-                writeFooterAndYield outBufferSize
+              if remainingCapacity >= footerSize
+                then do
+                  writeFooterAndYield remainingCapacity
+                else do
+                  -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
+                  yieldOutBuf (outBufferSize - remainingCapacity)
+                  writeFooterAndYield outBufferSize
 
-          Just bs -> do
-            let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
-            newRemainingCapacity <- foldM (\cap subBs -> loopSingleBs cap subBs) remainingCapacity bss
-            loop newRemainingCapacity
+            Just bs -> do
+              let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
+              newRemainingCapacity <- foldM (\cap subBs -> loopSingleBs cap subBs) remainingCapacity bss
+              loop newRemainingCapacity
 
-      loopSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
-      loopSingleBs remainingCapacity bs
-        | remainingCapacity < compressBound = do
-            -- Not enough space in outBuf to guarantee that the next call
-            -- to `lz4fCompressUpdate` will fit; so yield (a copy of) the
-            -- current outBuf, then it's all free again.
-            outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral (outBufferSize - remainingCapacity))
-            yield outBs
-            loopSingleBs outBufferSize bs
-        | otherwise = do
-            written <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
-              let bsLenSize = fromIntegral bsLen
+        loopSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        loopSingleBs remainingCapacity bs
+          | remainingCapacity < compressBound = do
+              -- Not enough space in outBuf to guarantee that the next call
+              -- to `lz4fCompressUpdate` will fit; so yield (a copy of) the
+              -- current outBuf, then it's all free again.
+              outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral (outBufferSize - remainingCapacity))
+              yield outBs
+              loopSingleBs outBufferSize bs
+          | otherwise = do
+              written <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
+                let bsLenSize = fromIntegral bsLen
 
-              -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks]
-              let offset = fromIntegral $ outBufferSize - remainingCapacity
-              withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
+                -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks]
+                let offset = fromIntegral $ outBufferSize - remainingCapacity
+                withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
 
-            let newRemainingCapacity = remainingCapacity - written
-            -- TODO assert newRemainingCapacity > 0
-            let writtenInt = fromIntegral written
+              let newRemainingCapacity = remainingCapacity - written
+              -- TODO assert newRemainingCapacity > 0
+              let writtenInt = fromIntegral written
 
-            if
-              | written == 0              -> return newRemainingCapacity
-              | writtenInt < BS.length bs -> loopSingleBs newRemainingCapacity (BS.drop writtenInt bs)
-              | otherwise                 -> return newRemainingCapacity
+              if
+                | written == 0              -> return newRemainingCapacity
+                | writtenInt < BS.length bs -> loopSingleBs newRemainingCapacity (BS.drop writtenInt bs)
+                | otherwise                 -> return newRemainingCapacity
 
-  loop (outBufferSize - headerSize)
+    loop (outBufferSize - headerSize)
 
-  -- Force resource release here to guarantee memory constantness
-  -- of the conduit (and not rely on GC to do it "at some point in the future").
-  liftIO $ finalizeForeignPtr outBuf
-  liftIO $ finalizeForeignPtr (unLz4FramePreferencesPtr prefs)
-  liftIO $ finalizeForeignPtr (unLz4FrameCompressionContext ctx)
+
 
 
 -- All notes that apply to `haskell_lz4_freeCompressionContext` apply
