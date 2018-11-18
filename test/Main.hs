@@ -3,7 +3,6 @@
 module Main (main) where
 
 import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf)
-import           Control.Monad (when)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -13,6 +12,10 @@ import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Process as CP
 import           Data.List (intersperse)
 import           Test.Hspec
+import           Test.Hspec.QuickCheck (modifyMaxSize)
+import qualified Test.QuickCheck as QC
+import qualified Test.QuickCheck.Monadic as QCM
+
 
 
 runCompressToLZ4 :: ConduitT () ByteString IO () -> IO ByteString
@@ -27,13 +30,14 @@ runLZ4ToDecompress source = do
 
 main :: IO ()
 main = do
-  when (bsChunksOf 3 "abc123def4567" /= ["abc", "123", "def", "456", "7"]) $
-    error "bsChunksOf failed"
-
   let prepare :: [BSL.ByteString] -> [ByteString]
       prepare strings = BSL.toChunks $ BSL.concat $ intersperse " " $ ["BEGIN"] ++ strings ++ ["END"]
 
   hspec $ do
+    describe "bsChunksOf" $ do
+      it "chunks up a string" $ do
+        bsChunksOf 3 "abc123def4567" `shouldBe` ["abc", "123", "def", "456", "7"]
+
     describe "Compression" $ do
       it "compresses simple string" $ do
         let string = "hellohellohellohello"
@@ -65,3 +69,10 @@ main = do
         let strings = prepare $ replicate 100000 "hello" 
         actual <- runLZ4ToDecompress (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
+
+    describe "Identity" $ do
+      modifyMaxSize (const 10000) $ it "compress and decompress arbitrary strings"$
+        QC.property $ \string -> QCM.monadicIO $ do
+          let bs = BSL.toChunks $ BSL8.pack string
+          actual <- QCM.run (runConduit $ CL.sourceList bs .| compress .| decompress .| CL.consume)
+          QCM.assert(BS.concat bs == BS.concat actual)
