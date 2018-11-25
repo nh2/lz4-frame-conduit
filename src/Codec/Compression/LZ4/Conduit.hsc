@@ -603,13 +603,13 @@ compressWithOutBufferSize bufferSize =
                 withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
 
               let newRemainingCapacity = remainingCapacity - written
-              -- TODO assert newRemainingCapacity > 0
-              let writtenInt = fromIntegral written
 
               if
-                | written == 0              -> return newRemainingCapacity
-                | writtenInt < BS.length bs -> loopSingleBs newRemainingCapacity (BS.drop writtenInt bs)
-                | otherwise                 -> return newRemainingCapacity
+                | written == 0 -> return remainingCapacity
+                | otherwise -> do
+                    yieldOutBuf (outBufferSize - newRemainingCapacity)
+                    return outBufferSize
+
 
     loop (outBufferSize - headerSize)
 
