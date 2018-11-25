@@ -6,6 +6,13 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
+-- | Conduit implementing the official LZ4 frame streaming format.
+--
+-- == Note on @unsafe@ FFI
+--
+-- All LZ4 C functions are supposed to be CPU-bound, do not perform
+-- any form of blocking IO, and there are no callbacks back into Haskell.
+-- Correspondingly, we use unsafe FFI calls everywhere.
 module Codec.Compression.LZ4.Conduit
   ( Lz4FrameException(..)
   , BlockSizeID(..)
@@ -144,7 +151,7 @@ foreign import ccall "&haskell_lz4_freeCompressionContext" haskell_lz4_freeCompr
 allocateLz4fScopedCompressionContext :: IO ScopedLz4FrameCompressionContext
 allocateLz4fScopedCompressionContext = do
   alloca $ \(ctxPtrPtr :: Ptr (Ptr LZ4F_cctx)) -> do
-    _ <- handleLz4Error [C.block| size_t {
+    _ <- handleLz4Error [CUnsafe.block| size_t {
       LZ4F_cctx** ctxPtr = $(LZ4F_cctx** ctxPtrPtr);
       LZ4F_errorCode_t err = LZ4F_createCompressionContext(ctxPtr, LZ4F_VERSION);
       return err;
@@ -156,7 +163,7 @@ allocateLz4fScopedCompressionContext = do
 freeLz4ScopedCompressionContext :: ScopedLz4FrameCompressionContext -> IO ()
 freeLz4ScopedCompressionContext (ScopedLz4FrameCompressionContext ctxPtr) = do
   _ <- handleLz4Error
-    [C.block| size_t {
+    [CUnsafe.block| size_t {
       return LZ4F_freeCompressionContext($(LZ4F_cctx* ctxPtr));
     } |]
   return ()
@@ -224,7 +231,7 @@ lz4fCreateCompressonContext = do
   --      But we should check if `addForeignPtrFinalizer` itself is actually
   --      async exception safe; if not, this is pointless.
 
-  _ <- handleLz4Error [C.block| size_t {
+  _ <- handleLz4Error [CUnsafe.block| size_t {
     LZ4F_cctx** ctxPtr = $fptr-ptr:(LZ4F_cctx** ctxForeignPtr);
     LZ4F_errorCode_t err = LZ4F_createCompressionContext(ctxPtr, LZ4F_VERSION);
     return err;
@@ -269,7 +276,7 @@ withScopedLz4fPreferences f =
 
 lz4fCompressBegin :: (HasCallStack) => ScopedLz4FrameCompressionContext -> ScopedLz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
 lz4fCompressBegin (ScopedLz4FrameCompressionContext ctx) (ScopedLz4FramePreferencesPtr prefsPtr) headerBuf headerBufLen = do
-  headerSize <- handleLz4Error [C.block| size_t {
+  headerSize <- handleLz4Error [CUnsafe.block| size_t {
 
     LZ4F_preferences_t* lz4_preferences_ptr = $(LZ4F_preferences_t* prefsPtr);
 
@@ -282,7 +289,7 @@ lz4fCompressBegin (ScopedLz4FrameCompressionContext ctx) (ScopedLz4FramePreferen
 
 lz4fCompressBound :: (HasCallStack) => CSize -> ScopedLz4FramePreferencesPtr -> IO CSize
 lz4fCompressBound srcSize (ScopedLz4FramePreferencesPtr prefsPtr) = do
-  handleLz4Error [C.block| size_t {
+  handleLz4Error [CUnsafe.block| size_t {
     size_t err_or_frame_size = LZ4F_compressBound($(size_t srcSize), $(LZ4F_preferences_t* prefsPtr));
     return err_or_frame_size;
   } |]
@@ -291,7 +298,7 @@ lz4fCompressBound srcSize (ScopedLz4FramePreferencesPtr prefsPtr) = do
 lz4fCompressUpdate :: (HasCallStack) => ScopedLz4FrameCompressionContext -> Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CSize
 lz4fCompressUpdate (ScopedLz4FrameCompressionContext ctx) destBuf destBufLen srcBuf srcBufLen = do
   -- TODO allow passing in cOptPtr instead of NULL.
-  written <- handleLz4Error [C.block| size_t {
+  written <- handleLz4Error [CUnsafe.block| size_t {
     size_t err_or_written = LZ4F_compressUpdate($(LZ4F_cctx* ctx), $(char* destBuf), $(size_t destBufLen), $(char* srcBuf), $(size_t srcBufLen), NULL);
     return err_or_written;
   } |]
@@ -301,7 +308,7 @@ lz4fCompressUpdate (ScopedLz4FrameCompressionContext ctx) destBuf destBufLen src
 lz4fCompressEnd :: (HasCallStack) => ScopedLz4FrameCompressionContext -> Ptr CChar -> CSize -> IO CSize
 lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = do
   -- TODO allow passing in cOptPtr instead of NULL.
-  footerWritten <- handleLz4Error [C.block| size_t {
+  footerWritten <- handleLz4Error [CUnsafe.block| size_t {
     size_t err_or_footerWritten = LZ4F_compressEnd($(LZ4F_cctx* ctx), $(char* footerBuf), $(size_t footerBufLen), NULL);
     return err_or_footerWritten;
   } |]
@@ -547,7 +554,7 @@ lz4fCreateDecompressionContext = do
 
   addForeignPtrFinalizer haskell_lz4_freeDecompressionContext ctxForeignPtr
 
-  _ <- handleLz4Error [C.block| size_t {
+  _ <- handleLz4Error [CUnsafe.block| size_t {
     LZ4F_dctx** ctxPtr = $fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
     LZ4F_errorCode_t err = LZ4F_createDecompressionContext(ctxPtr, LZ4F_VERSION);
     return err;
@@ -558,7 +565,7 @@ lz4fCreateDecompressionContext = do
 lz4fGetFrameInfo :: (HasCallStack) => Lz4FrameDecompressionContext -> Ptr FrameInfo -> Ptr CChar -> Ptr CSize -> IO CSize
 lz4fGetFrameInfo (Lz4FrameDecompressionContext ctxForeignPtr) frameInfoPtr srcBuffer srcSizePtr = do
 
-  decompressSizeHint <- handleLz4Error [C.block| size_t {
+  decompressSizeHint <- handleLz4Error [CUnsafe.block| size_t {
     LZ4F_dctx* ctxPtr = *$fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
     LZ4F_errorCode_t err_or_decompressSizeHint = LZ4F_getFrameInfo(ctxPtr, $(LZ4F_frameInfo_t* frameInfoPtr), $(char* srcBuffer), $(size_t* srcSizePtr));
     return err_or_decompressSizeHint;
@@ -570,7 +577,7 @@ lz4fDecompress :: (HasCallStack) => Lz4FrameDecompressionContext -> Ptr CChar ->
 lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr srcBuffer srcSizePtr = do
   -- TODO allow passing in dOptPtr instead of NULL.
 
-  decompressSizeHint <- handleLz4Error [C.block| size_t {
+  decompressSizeHint <- handleLz4Error [CUnsafe.block| size_t {
     LZ4F_dctx* ctxPtr = *$fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
     LZ4F_errorCode_t err_or_decompressSizeHint = LZ4F_decompress(ctxPtr, $(char* dstBuffer), $(size_t* dstSizePtr), $(char* srcBuffer), $(size_t* srcSizePtr), NULL);
     return err_or_decompressSizeHint;
