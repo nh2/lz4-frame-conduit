@@ -445,10 +445,11 @@ compressNoBuffering = do
 -- | Compresses the incoming stream of ByteStrings with the lz4 frame format.
 --
 -- Yields every LZ4 output as a ByteString as soon as the lz4 frame
--- library produces it.
+-- library produces it (so there is no output buffering to try to reduce
+-- the number of outputs emitted for the case that inputs compress very well).
 --
--- Note that this does not imply ZL4 frame autoFlush (which affects
--- when the lz4 frame library produces outputs).
+-- Note that this does not imply ZL4 frame autoFlush (see also `compressNoBuffering`),
+-- so input buffering is still happening to combine small inputs.
 compressYieldImmediately :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 compressYieldImmediately =
   withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
