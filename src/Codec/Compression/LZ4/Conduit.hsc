@@ -454,8 +454,11 @@ compressWithOutBufferSize bufferSize =
     -- of constant size for the compression.
     let bsInChunkSize = 16*1024
 
-    compressBound <- liftIO $ lz4fCompressBound (#{const LZ4F_HEADER_SIZE_MAX} + bsInChunkSize) prefs
-    let outBufferSize = max bufferSize compressBound
+    compressBound <- liftIO $ lz4fCompressBound bsInChunkSize prefs
+    -- The compressBound already includes the size of the footer,
+    -- see LZ4F_compressBound() docs.
+    let outBufferSize = max bufferSize (#{const LZ4F_HEADER_SIZE_MAX} + compressBound)
+
 
     outBuf <- liftIO $ mallocForeignPtrBytes (fromIntegral outBufferSize)
     let withOutBuf f = liftIO $ withForeignPtr outBuf f
@@ -475,18 +478,9 @@ compressWithOutBufferSize bufferSize =
           await >>= \case
             Nothing -> do
               -- Done, write footer.
-
-              -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
-              -- see docs of LZ4F_compressBound() for that.
-              footerSize <- liftIO $ lz4fCompressBound 0 prefs
-
-              if remainingCapacity >= footerSize
-                then do
-                  writeFooterAndYield remainingCapacity
-                else do
-                  -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
-                  yieldOutBuf (outBufferSize - remainingCapacity)
-                  writeFooterAndYield outBufferSize
+              -- We know it fits because it's already accounted for
+              -- in lz4fCompressBound above.
+              writeFooterAndYield remainingCapacity
 
             Just bs -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
