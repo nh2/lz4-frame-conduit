@@ -127,7 +127,7 @@ data FrameInfo = FrameInfo
   , contentChecksumFlag :: ContentChecksum
   , frameType           :: FrameType
   , contentSize         :: Word64
-  }
+  } deriving (Eq, Ord, Show)
 
 instance Storable FrameInfo where
   sizeOf _ = #{size LZ4F_frameInfo_t}
@@ -161,7 +161,7 @@ data Preferences = Preferences
   { frameInfo        :: FrameInfo
   , compressionLevel :: Int
   , autoFlush        :: Bool
-  }
+  } deriving (Eq, Ord, Show)
 
 instance Storable Preferences where
   sizeOf _ = #{size LZ4F_preferences_t}
