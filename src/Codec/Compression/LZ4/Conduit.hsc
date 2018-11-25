@@ -25,6 +25,7 @@ module Codec.Compression.LZ4.Conduit
   , lz4DefaultPreferences
 
   , compress
+  , compressNoBuffering
   , compressYieldImmediately
   , compressWithOutBufferSize
 
@@ -274,6 +275,15 @@ withScopedLz4fPreferences f =
     f
 
 
+-- Simple API
+lz4fCompressFrameBound :: (HasCallStack) => CSize -> ScopedLz4FramePreferencesPtr -> IO CSize
+lz4fCompressFrameBound srcSize (ScopedLz4FramePreferencesPtr prefsPtr) = do
+  handleLz4Error [CUnsafe.block| size_t {
+    size_t err_or_frame_size = LZ4F_compressFrameBound($(size_t srcSize), $(LZ4F_preferences_t* prefsPtr));
+    return err_or_frame_size;
+  } |]
+
+
 lz4fCompressBegin :: (HasCallStack) => ScopedLz4FrameCompressionContext -> ScopedLz4FramePreferencesPtr -> Ptr CChar -> CSize -> IO CSize
 lz4fCompressBegin (ScopedLz4FrameCompressionContext ctx) (ScopedLz4FramePreferencesPtr prefsPtr) headerBuf headerBufLen = do
   headerSize <- handleLz4Error [CUnsafe.block| size_t {
@@ -328,6 +338,21 @@ compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString
 compress = compressWithOutBufferSize 0
 
 
+withLz4PrefsConduit ::
+  (MonadUnliftIO m, MonadResource m)
+  => (ScopedLz4FramePreferencesPtr -> ConduitT i o m r)
+  -> ConduitT i o m r
+withLz4PrefsConduit f = bracketP
+  (do
+    prefsPtr <- new lz4DefaultPreferences
+    return (ScopedLz4FramePreferencesPtr prefsPtr)
+  )
+  (\(ScopedLz4FramePreferencesPtr prefsPtr) -> do
+    free prefsPtr
+  )
+  f
+
+
 withLz4CtxAndPrefsConduit ::
   (MonadUnliftIO m, MonadResource m)
   => ((ScopedLz4FrameCompressionContext, ScopedLz4FramePreferencesPtr) -> ConduitT i o m r)
@@ -343,6 +368,78 @@ withLz4CtxAndPrefsConduit f = bracketP
     free prefsPtr
   )
   f
+
+
+-- | Compresses the incoming stream of ByteStrings with the lz4 frame format.
+--
+-- Turns every incoming `ByteString` into a full block using lz4's simple
+-- API. The simple API enables lz4 frame autoFlush, which disables combining
+-- multiple inputs into a single block. (This is opposed to the advanced API
+-- that can combine multiple inputs into a single block; for that see the other
+-- compression functions in this module).
+--
+-- This means every input fed into this conduit will immediately
+-- result in exactly one ByteString being produced.
+--
+-- It is not recommended to use this function when the incoming `ByteString`s
+-- are small, because each block carries a few bytes overhead.
+--
+-- This conduit allocates and maintains an output buffer into which lz4 writes
+-- its data. The buffer is automatically grown as needed (and never shrunk),
+-- but it is capped to a constant slightly larger than the @blockSizeID@ in
+-- @lz4DefaultPreferences@.
+--
+-- For large `ByteString`s of (roughly) equal size, this is faster than
+-- the advanced API because ... TODO explain.
+compressNoBuffering :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
+compressNoBuffering = do
+  let dstBufferSizeDefault :: CSize
+      dstBufferSizeDefault = 16 * 1024
+
+  bracketP
+    (do
+      dstBufferPtr <- malloc
+      dstBufferSizePtr <- malloc
+      poke dstBufferPtr =<< mallocArray (fromIntegral dstBufferSizeDefault)
+      poke dstBufferSizePtr dstBufferSizeDefault
+      return (dstBufferPtr, dstBufferSizePtr)
+    )
+    (\(dstBufferPtr, dstBufferSizePtr) -> do
+      free =<< peek dstBufferPtr
+      free dstBufferPtr
+      free dstBufferSizePtr
+    )
+    $ \(dstBufferPtr, dstBufferSizePtr) -> do
+
+    let ensureDstBufferSize :: CSize -> IO (Ptr CChar)
+        ensureDstBufferSize size = do
+          dstBufferSize <- peek dstBufferSizePtr
+          when (size > dstBufferSize) $ do
+            dstBuffer <- peek dstBufferPtr
+            poke dstBufferPtr =<< reallocArray dstBuffer (fromIntegral size)
+            poke dstBufferSizePtr size
+          peek dstBufferPtr
+
+    withLz4PrefsConduit $ \prefs -> do
+
+      let ScopedLz4FramePreferencesPtr prefsPtr = prefs
+
+      awaitForever $ \bs -> do
+
+        outBs <- liftIO $ unsafeUseAsCStringLen bs $ \(srcBuf, srcBufLenInt) -> do
+
+          let srcBufLen = fromIntegral srcBufLenInt
+
+          destBufLen <- lz4fCompressFrameBound srcBufLen prefs
+          destBuf <- ensureDstBufferSize destBufLen
+
+          written <- handleLz4Error [CUnsafe.block| size_t {
+            size_t err_or_written = LZ4F_compressFrame($(char* destBuf), $(size_t destBufLen), $(char* srcBuf), $(size_t srcBufLen), $(LZ4F_preferences_t* prefsPtr));
+            return err_or_written;
+          } |]
+          packCStringLen (destBuf, fromIntegral written)
+
+        yield outBs
 
 
 -- | Compresses the incoming stream of ByteStrings with the lz4 frame format.
