@@ -582,6 +582,9 @@ decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteStri
 decompress = do
   ctx <- liftIO lz4fCreateDecompressionContext
 
+  -- The current code complies with the LZ4 Frame Format Description
+  -- v1.5.1.
+
   -- OK, now here it gets a bit ugly.
   -- The lz4frame library provides no function with which we can
   -- determine how large the header is.
