@@ -335,12 +335,12 @@ withLz4CtxAndPrefsConduit ::
 withLz4CtxAndPrefsConduit f = bracketP
   (do
     ctx <- allocateLz4fScopedCompressionContext
-    prefPtr <- new lz4DefaultPreferences
-    return (ctx, ScopedLz4FramePreferencesPtr prefPtr)
+    prefsPtr <- new lz4DefaultPreferences
+    return (ctx, ScopedLz4FramePreferencesPtr prefsPtr)
   )
-  (\(ctx, ScopedLz4FramePreferencesPtr prefPtr) -> do
+  (\(ctx, ScopedLz4FramePreferencesPtr prefsPtr) -> do
     freeLz4ScopedCompressionContext ctx
-    free prefPtr
+    free prefsPtr
   )
   f
 
