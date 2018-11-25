@@ -583,7 +583,7 @@ decompress = do
   ctx <- liftIO lz4fCreateDecompressionContext
 
   -- The current code complies with the LZ4 Frame Format Description
-  -- v1.5.1.
+  -- v1.6.0.
 
   -- OK, now here it gets a bit ugly.
   -- The lz4frame library provides no function with which we can
@@ -596,6 +596,7 @@ decompress = do
   -- Is ugly because ideally we would rely only on the lz4frame API
   -- and not on the spec of the frame format, but we have no other
   -- choice in this case.
+  -- I filed https://github.com/lz4/lz4/issues/607 for it.
 
   first5Bytes <- CB.take 5
   when (BSL.length first5Bytes /= 5) $ do
@@ -603,10 +604,22 @@ decompress = do
 
   let byteFLG = BSL.index first5Bytes 4
   let contentSizeBit = testBit byteFLG 3
+  let dictIDBit = testBit byteFLG 0
 
-  let numRemainingHeaderBytes
-        | contentSizeBit = 2 + 8
-        | otherwise      = 2
+  let contentSizeHeaderBytes
+        | contentSizeBit = 8
+        | otherwise      = 0
+
+  -- Available with LZ4 Frame Format Description spec >= v1.6.0.
+  let dictionaryIDHeaderBytes
+        | dictIDBit = 4
+        | otherwise = 0
+
+  let numRemainingHeaderBytes =
+        1 -- BD byte
+        + contentSizeHeaderBytes
+        + dictionaryIDHeaderBytes
+        + 1 -- HC byte
 
   remainingHeaderBytes <- CB.take numRemainingHeaderBytes
 
