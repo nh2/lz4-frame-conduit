@@ -381,7 +381,7 @@ compressYieldImmediately =
         --      even when the input size passed to it is just a few bytes.
         --      As a result, we allocate at least a full block size each time
         --      (and `allocaBytes` calls `malloc()`), but not using most of it.
-        --      Worse, with autoflush=0, most small inputs go into the context buffer,
+        --      Worse, with autoflush=0, most small inputs go into the context input buffer,
         --      in which case the `allocaBytes` is completely wasted.
         --      This could be avoided by keeping the last `allocaBytes` buffer around,
         --      and reusing it if it is big enough for the number returned by
@@ -393,7 +393,7 @@ compressYieldImmediately =
           -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks].
           written <- lz4fCompressUpdate ctx buf size bsPtr bsLenSize
 
-          if written == 0 -- everything fit into the context buffer, no new compressed data was emitted
+          if written == 0 -- everything fit into the context input buffer, no new compressed data was emitted
             then return Nothing
             else Just <$> packCStringLen (buf, fromIntegral written)
 
