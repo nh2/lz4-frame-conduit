@@ -560,22 +560,14 @@ compressWithOutBufferSize bufferSize haskellPrefs =
 
             Just bs -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
-              newRemainingCapacity <- foldM (\cap subBs -> processBs cap subBs) remainingCapacity bss
+              -- Invariant during the fold:
+              -- There's always enough `remainingCapacity` to fit
+              -- at least one incoming ByteString + the footer
+              -- (that is, compressBound <= remainingCapacity)
+              newRemainingCapacity <- foldM (\cap subBs -> compressFittingBs cap subBs) remainingCapacity bss
               loop newRemainingCapacity
 
-        processBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
-        processBs remainingCapacity bs = do
-          if compressBound <= remainingCapacity
-            then do
-              compressFittingBs remainingCapacity bs
-            else do
-              -- Not enough space in outBuf to guarantee that the next call
-              -- to `lz4fCompressUpdate` will fit; so yield (a copy of) the
-              -- current outBuf, then it's all free again.
-              yieldOutBuf (outBufferSize - remainingCapacity)
-              compressFittingBs outBufferSize bs
-
-        -- PRE: BS.length bs <= remainingCapacity
+        -- PRE: compressBound <= remainingCapacity
         compressFittingBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
         compressFittingBs remainingCapacity bs = do
 
@@ -590,8 +582,14 @@ compressWithOutBufferSize bufferSize haskellPrefs =
             | written == 0 -> return remainingCapacity
             | otherwise -> do
                 let newRemainingCapacity = remainingCapacity - written
-                yieldOutBuf (outBufferSize - newRemainingCapacity)
-                return outBufferSize
+                if compressBound <= newRemainingCapacity
+                  then return newRemainingCapacity
+                  else do
+                    -- Not enough space in outBuf to guarantee that the next call
+                    -- to `lz4fCompressUpdate` will fit; so yield (a copy of) the
+                    -- current outBuf, then it's all free again.
+                    yieldOutBuf (outBufferSize - newRemainingCapacity)
+                    return outBufferSize
 
     loop (outBufferSize - headerSize)
 
