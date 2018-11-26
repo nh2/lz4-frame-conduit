@@ -37,9 +37,7 @@ module Codec.Compression.LZ4.Conduit
   , Lz4FrameCompressionContext(..)
   , ScopedLz4FrameCompressionContext(..)
   , ScopedLz4FramePreferencesPtr(..)
-  , Lz4FramePreferencesPtr(..)
   , Lz4FrameDecompressionContext(..)
-  , lz4fCreatePreferences
   , lz4fCreateCompressonContext
   , lz4fCreateDecompressionContext
   , withScopedLz4fPreferences
@@ -91,9 +89,6 @@ newtype ScopedLz4FrameCompressionContext = ScopedLz4FrameCompressionContext { un
   deriving (Eq, Ord, Show)
 
 newtype ScopedLz4FramePreferencesPtr = ScopedLz4FramePreferencesPtr { unScopedLz4FramePreferencesPtr :: Ptr Preferences }
-  deriving (Eq, Ord, Show)
-
-newtype Lz4FramePreferencesPtr = Lz4FramePreferencesPtr { unLz4FramePreferencesPtr :: ForeignPtr Preferences }
   deriving (Eq, Ord, Show)
 
 newtype Lz4FrameDecompressionContext = Lz4FrameDecompressionContext { unLz4FrameDecompressionContext :: ForeignPtr (Ptr LZ4F_dctx) }
@@ -245,6 +240,8 @@ lz4DefaultPreferences =
   Preferences
     { frameInfo = FrameInfo
       { blockSizeID = LZ4F_default
+      -- The above is the default of the lz4 library, but
+      -- 4 MB is the default of the lz4 CLI utility (as of writing).
       , blockMode = LZ4F_blockLinked
       , contentChecksumFlag = LZ4F_noContentChecksum
       , frameType = LZ4F_frame
@@ -255,22 +252,10 @@ lz4DefaultPreferences =
     }
 
 
-newForeignPtr :: (Storable a) => a -> IO (ForeignPtr a)
-newForeignPtr x = do
-  fptr <- mallocForeignPtr
-  withForeignPtr fptr $ \ptr -> poke ptr x
-  return fptr
-
-
-lz4fCreatePreferences :: IO Lz4FramePreferencesPtr
-lz4fCreatePreferences =
-  Lz4FramePreferencesPtr <$> newForeignPtr lz4DefaultPreferences
-
-
-withScopedLz4fPreferences :: (HasCallStack) => (ScopedLz4FramePreferencesPtr -> IO a) -> IO a
-withScopedLz4fPreferences f =
+withScopedLz4fPreferences :: (HasCallStack) => Preferences -> (ScopedLz4FramePreferencesPtr -> IO a) -> IO a
+withScopedLz4fPreferences prefs f =
   bracket
-    (ScopedLz4FramePreferencesPtr <$> new lz4DefaultPreferences)
+    (ScopedLz4FramePreferencesPtr <$> new prefs)
     (\(ScopedLz4FramePreferencesPtr ptr) -> free ptr)
     f
 
@@ -335,16 +320,17 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
 
 
 compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-compress = compressWithOutBufferSize 0
+compress = compressWithOutBufferSize 0 lz4DefaultPreferences
 
 
 withLz4PrefsConduit ::
   (MonadUnliftIO m, MonadResource m)
-  => (ScopedLz4FramePreferencesPtr -> ConduitT i o m r)
+  => Preferences
+  -> (ScopedLz4FramePreferencesPtr -> ConduitT i o m r)
   -> ConduitT i o m r
-withLz4PrefsConduit f = bracketP
+withLz4PrefsConduit prefs f = bracketP
   (do
-    prefsPtr <- new lz4DefaultPreferences
+    prefsPtr <- new prefs
     return (ScopedLz4FramePreferencesPtr prefsPtr)
   )
   (\(ScopedLz4FramePreferencesPtr prefsPtr) -> do
@@ -353,21 +339,15 @@ withLz4PrefsConduit f = bracketP
   f
 
 
-withLz4CtxAndPrefsConduit ::
+withLz4CtxConduit ::
   (MonadUnliftIO m, MonadResource m)
-  => ((ScopedLz4FrameCompressionContext, ScopedLz4FramePreferencesPtr) -> ConduitT i o m r)
+  => (ScopedLz4FrameCompressionContext -> ConduitT i o m r)
   -> ConduitT i o m r
-withLz4CtxAndPrefsConduit f = bracketP
-  (do
-    ctx <- allocateLz4fScopedCompressionContext
-    prefsPtr <- new lz4DefaultPreferences
-    return (ctx, ScopedLz4FramePreferencesPtr prefsPtr)
-  )
-  (\(ctx, ScopedLz4FramePreferencesPtr prefsPtr) -> do
-    freeLz4ScopedCompressionContext ctx
-    free prefsPtr
-  )
-  f
+withLz4CtxConduit f =
+  bracketP
+    allocateLz4fScopedCompressionContext
+    freeLz4ScopedCompressionContext
+    f
 
 
 -- | Compresses the incoming stream of ByteStrings with the lz4 frame format.
@@ -387,12 +367,12 @@ withLz4CtxAndPrefsConduit f = bracketP
 -- This conduit allocates and maintains an output buffer into which lz4 writes
 -- its data. The buffer is automatically grown as needed (and never shrunk),
 -- but it is capped to a constant slightly larger than the @blockSizeID@ in
--- @lz4DefaultPreferences@.
+-- the given `Preferences`.
 --
 -- For large `ByteString`s of (roughly) equal size, this is faster than
 -- the advanced API because the input is processed zero-copy fashion.
-compressNoBuffering :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-compressNoBuffering = do
+compressNoBuffering :: (MonadUnliftIO m, MonadResource m) => Preferences -> ConduitT ByteString ByteString m ()
+compressNoBuffering haskellPrefs = do
   let dstBufferSizeDefault :: CSize
       dstBufferSizeDefault = 16 * 1024
 
@@ -420,7 +400,9 @@ compressNoBuffering = do
             poke dstBufferSizePtr size
           peek dstBufferPtr
 
-    withLz4PrefsConduit $ \prefs -> do
+    withLz4PrefsConduit haskellPrefs $ \prefs -> do
+    -- TODO check if this works
+    -- withScopedLz4fPreferences haskellPrefs $ \prefs -> do
 
       let ScopedLz4FramePreferencesPtr prefsPtr = prefs
 
@@ -450,9 +432,11 @@ compressNoBuffering = do
 --
 -- Note that this does not imply ZL4 frame autoFlush (see also `compressNoBuffering`),
 -- so input buffering is still happening to combine small inputs.
-compressYieldImmediately :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-compressYieldImmediately =
-  withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
+compressYieldImmediately :: (MonadUnliftIO m, MonadResource m) => Preferences -> ConduitT ByteString ByteString m ()
+compressYieldImmediately haskellPrefs =
+  withLz4PrefsConduit haskellPrefs $ \prefs -> do
+  withLz4CtxConduit $ \ctx -> do
+
     let _LZ4F_HEADER_SIZE_MAX = #{const LZ4F_HEADER_SIZE_MAX}
 
     -- Header
@@ -543,9 +527,10 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
-compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT ByteString ByteString m ()
-compressWithOutBufferSize bufferSize =
-  withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
+compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> Preferences -> ConduitT ByteString ByteString m ()
+compressWithOutBufferSize bufferSize haskellPrefs =
+  withLz4PrefsConduit haskellPrefs $ \prefs -> do
+  withLz4CtxConduit $ \ctx -> do
 
     -- We split any incoming ByteString into chunks of this size, so that
     -- we can pass this size to `lz4fCompressBound` once and reuse a buffer
