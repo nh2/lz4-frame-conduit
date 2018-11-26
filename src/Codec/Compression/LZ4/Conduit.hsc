@@ -23,6 +23,7 @@ module Codec.Compression.LZ4.Conduit
   , Preferences(..)
 
   , lz4DefaultPreferences
+  , blockSizeBytes
 
   , compress
   , compressNoBuffering
@@ -58,12 +59,15 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Conduit
 import qualified Data.Conduit.Binary as CB
+import           Data.List (delete)
 import           Data.Monoid ((<>))
+import           Data.Traversable (for)
 import           Foreign.C.Types (CChar, CSize)
 import           GHC.Stack (HasCallStack)
 import qualified Language.C.Inline as C
 import qualified Language.C.Inline.Context as C
 import qualified Language.C.Inline.Unsafe as CUnsafe
+import           System.IO.Unsafe (unsafePerformIO)
 import           Text.RawString.QQ
 
 import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
@@ -303,6 +307,43 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
     return err_or_footerWritten;
   } |]
   return footerWritten
+
+
+blockSizeBytes :: BlockSizeID -> Int
+blockSizeBytes x = case x of
+  -- The default one is one of the other ones, but we have to ask the C lib which one.
+  LZ4F_default -> blockSizeBytes actualBlockSizeId
+    -- Ugly hack alert: Due to LZ4F_getBlockSize() not being exported
+    --   https://github.com/lz4/lz4/issues/608
+    -- we cannot ask the API which value LZ4F_default actually is.
+    -- As a workaround, figure it out via `LZ4F_compressBound`.
+    --
+    -- Using `unsafePerformIO` is safe here because the lz4 API promises
+    -- for LZ4F_compressBound():
+    --     Result is always the same for a srcSize and prefsPtr,
+    --     so it can be trusted to size reusable buffers.
+    where
+      actualBlockSizeId =
+        unsafePerformIO $ do
+          let prefsFor i =
+                let fi = (frameInfo lz4DefaultPreferences){ blockSizeID = i }
+                in lz4DefaultPreferences{ frameInfo = fi }
+
+          defaultBound <- withScopedLz4fPreferences (prefsFor LZ4F_default) $ \prefs -> do
+            lz4fCompressBound 0 prefs
+
+          idsWithBounds <- for (delete LZ4F_default [minBound..maxBound]) $ \i -> do
+            withScopedLz4fPreferences (prefsFor i) $ \prefs -> do
+              bound <- lz4fCompressBound 0 prefs
+              return (i, bound)
+
+          case [ i | (i, bound) <- idsWithBounds, bound == defaultBound ] of
+            [i] -> return i
+            _ -> error $ "blockSizeBytes: Got unexpected (idsWithBounds, defaultBound):" ++ show (idsWithBounds, defaultBound)
+  LZ4F_max64KB -> 64 * 1024
+  LZ4F_max256KB -> 256 * 1024
+  LZ4F_max1MB -> 1 * 1024 * 1024
+  LZ4F_max4MB -> 4 * 1024 * 1024
 
 
 -- Note [Single call to LZ4F_compressUpdate() can create multiple blocks]

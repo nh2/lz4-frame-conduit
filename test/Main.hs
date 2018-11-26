@@ -24,7 +24,7 @@ import           Test.Hspec.QuickCheck (modifyMaxSize)
 import qualified Test.QuickCheck as QC
 import qualified Test.QuickCheck.Monadic as QCM
 
-import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf)
+import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf, BlockSizeID(LZ4F_default), blockSizeBytes)
 
 
 runCompressToLZ4 :: (MonadUnliftIO m) => ConduitT () ByteString (ResourceT m) () -> m ByteString
@@ -124,6 +124,11 @@ main = do
     describe "bsChunksOf" $ do
       it "chunks up a string" $ do
         bsChunksOf 3 "abc123def4567" `shouldBe` ["abc", "123", "def", "456", "7"]
+
+    describe "BlockSizeID" $ do
+      it "blockSizeBytes works on LZ4F_default" $ do
+        -- Shouldn't loop forever
+        blockSizeBytes LZ4F_default `seq` return () :: Expectation
 
     describe "Compression" $ do
       it "compresses simple string" $ do
