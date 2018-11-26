@@ -582,38 +582,40 @@ compressWithOutBufferSize bufferSize =
 
             Just bs -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
-              newRemainingCapacity <- foldM (\cap subBs -> loopSingleBs cap subBs) remainingCapacity bss
+              newRemainingCapacity <- foldM (\cap subBs -> processBs cap subBs) remainingCapacity bss
               loop newRemainingCapacity
 
-        loopSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
-        loopSingleBs remainingCapacity bs
-          | remainingCapacity < compressBound = do
+        processBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        processBs remainingCapacity bs = do
+          if compressBound <= remainingCapacity
+            then do
+              compressFittingBs remainingCapacity bs
+            else do
               -- Not enough space in outBuf to guarantee that the next call
               -- to `lz4fCompressUpdate` will fit; so yield (a copy of) the
               -- current outBuf, then it's all free again.
-              outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral (outBufferSize - remainingCapacity))
-              yield outBs
-              loopSingleBs outBufferSize bs
-          | otherwise = do
-              written <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
-                let bsLenSize = fromIntegral bsLen
+              yieldOutBuf (outBufferSize - remainingCapacity)
+              compressFittingBs outBufferSize bs
 
-                -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks]
-                let offset = fromIntegral $ outBufferSize - remainingCapacity
-                withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
+        -- PRE: BS.length bs <= remainingCapacity
+        compressFittingBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressFittingBs remainingCapacity bs = do
 
-              let newRemainingCapacity = remainingCapacity - written
+          written <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
+            let bsLenSize = fromIntegral bsLen
 
-              if
-                | written == 0 -> return remainingCapacity
-                | otherwise -> do
-                    yieldOutBuf (outBufferSize - newRemainingCapacity)
-                    return outBufferSize
+            -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks]
+            let offset = fromIntegral $ outBufferSize - remainingCapacity
+            withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
 
+          if
+            | written == 0 -> return remainingCapacity
+            | otherwise -> do
+                let newRemainingCapacity = remainingCapacity - written
+                yieldOutBuf (outBufferSize - newRemainingCapacity)
+                return outBufferSize
 
     loop (outBufferSize - headerSize)
-
-
 
 
 -- All notes that apply to `haskell_lz4_freeCompressionContext` apply
