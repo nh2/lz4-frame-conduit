@@ -390,7 +390,7 @@ withLz4CtxAndPrefsConduit f = bracketP
 -- @lz4DefaultPreferences@.
 --
 -- For large `ByteString`s of (roughly) equal size, this is faster than
--- the advanced API because ... TODO explain.
+-- the advanced API because the input is processed zero-copy fashion.
 compressNoBuffering :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 compressNoBuffering = do
   let dstBufferSizeDefault :: CSize
