@@ -747,13 +747,16 @@ decompress = do
 
   let headerBs = BSL.toStrict $ BSL.concat [first5Bytes, remainingHeaderBytes]
 
-  headerDecompressSizeHint <- liftIO $ alloca $ \frameInfoPtr -> do
+  (info, headerDecompressSizeHint) <- liftIO $ alloca $ \frameInfoPtr -> do
     unsafeUseAsCStringLen headerBs $ \(headerBsPtr, headerBsLen) -> do
       with (fromIntegral headerBsLen :: CSize) $ \headerBsLenPtr -> do
-        lz4fGetFrameInfo ctx frameInfoPtr headerBsPtr headerBsLenPtr
+        hint <- lz4fGetFrameInfo ctx frameInfoPtr headerBsPtr headerBsLenPtr
+        info <- peek frameInfoPtr
+        return (info, hint)
 
+  -- Inform buffer size the BlockSizeID in the header.
   let dstBufferSizeDefault :: CSize
-      dstBufferSizeDefault = 16 * 1024
+      dstBufferSizeDefault = fromIntegral $ blockSizeBytes (blockSizeID info)
 
   bracketP
     (do
@@ -783,7 +786,7 @@ decompress = do
         loopSingleBs decompressSizeHint bs = do
           (outBs, srcRead, newDecompressSizeHint) <- liftIO $
             unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
-              let outBufSize = max decompressSizeHint dstBufferSizeDefault -- TODO check why decompressSizeHint is always 4
+              let outBufSize = max decompressSizeHint dstBufferSizeDefault
 
               -- Increase destination buffer size if necessary.
               dstBuffer <- ensureDstBufferSize outBufSize
