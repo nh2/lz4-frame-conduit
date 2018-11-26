@@ -45,6 +45,7 @@ module Codec.Compression.LZ4.Conduit
   ) where
 
 import           UnliftIO.Exception (throwString, bracket)
+import           UnliftIO.Foreign (addForeignPtrFinalizer, alloca, allocaBytes, finalizeForeignPtr, ForeignPtr, free, FunPtr, malloc, mallocArray, mallocForeignPtr, mallocForeignPtrBytes, new, nullPtr, plusPtr, poke, Ptr, reallocArray, Storable(..), with, withForeignPtr)
 import           Control.Monad (foldM, when)
 import           Control.Monad.IO.Unlift (MonadUnliftIO)
 import           Control.Monad.IO.Class (liftIO)
@@ -59,12 +60,6 @@ import           Data.Conduit
 import qualified Data.Conduit.Binary as CB
 import           Data.Monoid ((<>))
 import           Foreign.C.Types (CChar, CSize)
-import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
-import           Foreign.Marshal.Alloc (alloca, allocaBytes, malloc, free)
-import           Foreign.Marshal.Array (mallocArray, reallocArray)
-import           Foreign.Marshal.Utils (with, new)
-import           Foreign.Ptr (Ptr, nullPtr, FunPtr, plusPtr)
-import           Foreign.Storable (Storable(..), poke)
 import           GHC.Stack (HasCallStack)
 import qualified Language.C.Inline as C
 import qualified Language.C.Inline.Context as C
@@ -202,11 +197,11 @@ freeLz4ScopedCompressionContext (ScopedLz4FrameCompressionContext ctxPtr) = do
 -- TODO Turn the above TODO into documentation
 
 
-withScopedLz4fCompressionContext :: (HasCallStack) => (ScopedLz4FrameCompressionContext -> IO a) -> IO a
+withScopedLz4fCompressionContext :: (MonadUnliftIO m, HasCallStack) => (ScopedLz4FrameCompressionContext -> m a) -> m a
 withScopedLz4fCompressionContext f =
   bracket
-    allocateLz4fScopedCompressionContext
-    freeLz4ScopedCompressionContext
+    (liftIO allocateLz4fScopedCompressionContext)
+    (liftIO . freeLz4ScopedCompressionContext)
     f
 
 
@@ -252,7 +247,7 @@ lz4DefaultPreferences =
     }
 
 
-withScopedLz4fPreferences :: (HasCallStack) => Preferences -> (ScopedLz4FramePreferencesPtr -> IO a) -> IO a
+withScopedLz4fPreferences :: (MonadUnliftIO m, HasCallStack) => Preferences -> (ScopedLz4FramePreferencesPtr -> m a) -> m a
 withScopedLz4fPreferences prefs f =
   bracket
     (ScopedLz4FramePreferencesPtr <$> new prefs)
@@ -401,8 +396,6 @@ compressNoBuffering haskellPrefs = do
           peek dstBufferPtr
 
     withLz4PrefsConduit haskellPrefs $ \prefs -> do
-    -- TODO check if this works
-    -- withScopedLz4fPreferences haskellPrefs $ \prefs -> do
 
       let ScopedLz4FramePreferencesPtr prefsPtr = prefs
 
