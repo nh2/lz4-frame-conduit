@@ -13,6 +13,8 @@ module Codec.Compression.LZ4.CTypes
   , Preferences(..)
   , LZ4F_cctx
   , LZ4F_dctx
+  , fromNumericBlockSizeID
+  , toNumericBlockSizeId
   , lz4FrameTypesTable
   ) where
 
@@ -42,26 +44,39 @@ data BlockSizeID
   | LZ4F_max256KB
   | LZ4F_max1MB
   | LZ4F_max4MB
-  deriving (Eq, Ord, Show)
+  deriving (Eq, Ord, Show, Bounded, Enum)
+
+
+fromNumericBlockSizeID :: #{type LZ4F_blockSizeID_t} -> Maybe BlockSizeID
+fromNumericBlockSizeID n =
+  case n of
+    #{const LZ4F_default} -> Just LZ4F_default
+    #{const LZ4F_max64KB} -> Just LZ4F_max64KB
+    #{const LZ4F_max256KB} -> Just LZ4F_max256KB
+    #{const LZ4F_max1MB} -> Just LZ4F_max1MB
+    #{const LZ4F_max4MB} -> Just LZ4F_max4MB
+    _ -> Nothing
+
+
+toNumericBlockSizeId :: BlockSizeID -> #{type LZ4F_blockSizeID_t}
+toNumericBlockSizeId i =
+  case i of
+    LZ4F_default -> #{const LZ4F_default}
+    LZ4F_max64KB -> #{const LZ4F_max64KB}
+    LZ4F_max256KB -> #{const LZ4F_max256KB}
+    LZ4F_max1MB -> #{const LZ4F_max1MB}
+    LZ4F_max4MB -> #{const LZ4F_max4MB}
+
 
 instance Storable BlockSizeID where
   sizeOf _ = #{size LZ4F_blockSizeID_t}
   alignment _ = #{alignment LZ4F_blockSizeID_t}
   peek p = do
     n <- peek (castPtr p :: Ptr #{type LZ4F_blockSizeID_t})
-    case n of
-      #{const LZ4F_default} -> return LZ4F_default
-      #{const LZ4F_max64KB} -> return LZ4F_max64KB
-      #{const LZ4F_max256KB} -> return LZ4F_max256KB
-      #{const LZ4F_max1MB} -> return LZ4F_max1MB
-      #{const LZ4F_max4MB} -> return LZ4F_max4MB
-      _ -> throwIO $ Lz4FormatException $ "lz4 instance Storable BlockSizeID: encountered unknown LZ4F_blockSizeID_t: " ++ show n
-  poke p i = poke (castPtr p :: Ptr #{type LZ4F_blockSizeID_t}) $ case i of
-    LZ4F_default -> #{const LZ4F_default}
-    LZ4F_max64KB -> #{const LZ4F_max64KB}
-    LZ4F_max256KB -> #{const LZ4F_max256KB}
-    LZ4F_max1MB -> #{const LZ4F_max1MB}
-    LZ4F_max4MB -> #{const LZ4F_max4MB}
+    case fromNumericBlockSizeID n of
+      Just i -> return i
+      Nothing -> throwIO $ Lz4FormatException $ "lz4 instance Storable BlockSizeID: encountered unknown LZ4F_blockSizeID_t: " ++ show n
+  poke p i = poke (castPtr p :: Ptr #{type LZ4F_blockSizeID_t}) $ toNumericBlockSizeId i
 
 
 data BlockMode
