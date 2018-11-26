@@ -569,7 +569,11 @@ compressWithOutBufferSize bufferSize haskellPrefs =
     -- We split any incoming ByteString into chunks of this size, so that
     -- we can pass this size to `lz4fCompressBound` once and reuse a buffer
     -- of constant size for the compression.
-    let bsInChunkSize = 16*1024
+    -- We choose this to be equal the output block size (via blockSizeID),
+    -- because inputs being >= than the block size is the "fast path"
+    -- in LZ4F_compressUpdate() that does not copy inputs into the
+    -- context input buffer.
+    let bsInChunkSize = fromIntegral $ blockSizeBytes (blockSizeID (frameInfo haskellPrefs))
 
     compressBound <- liftIO $ lz4fCompressBound bsInChunkSize prefs
     -- The compressBound already includes the size of the footer,
