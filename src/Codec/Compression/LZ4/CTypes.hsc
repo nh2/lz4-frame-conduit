@@ -21,6 +21,7 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Typeable (Typeable)
 import           Data.Word (Word32, Word64)
+import           Foreign.Marshal.Utils (fillBytes)
 import           Foreign.Ptr (Ptr, castPtr)
 import           Foreign.Storable (Storable(..), poke)
 import qualified Language.C.Types as C
@@ -145,15 +146,14 @@ instance Storable FrameInfo where
       , contentSize
       }
   poke p frameInfo = do
+    fillBytes p 0 #{size LZ4F_preferences_t} -- set reserved fields to 0 as lz4frame.h requires
     #{poke LZ4F_frameInfo_t, blockSizeID} p $ blockSizeID frameInfo
     #{poke LZ4F_frameInfo_t, blockMode} p $ blockMode frameInfo
     #{poke LZ4F_frameInfo_t, contentChecksumFlag} p $ contentChecksumFlag frameInfo
     #{poke LZ4F_frameInfo_t, frameType} p $ frameType frameInfo
     #{poke LZ4F_frameInfo_t, contentSize} p $ contentSize frameInfo
-    -- Reserved fields must be 0 for forward compatibility,
-    -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L143
-    #{poke LZ4F_frameInfo_t, reserved[0]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_frameInfo_t, reserved[1]} p $ (0 :: #{type unsigned})
+    -- reserved uint field here, see lz4frame.h
+    -- reserved uint field here, see lz4frame.h
 
 
 data Preferences = Preferences
@@ -175,15 +175,14 @@ instance Storable Preferences where
       , autoFlush
       }
   poke p preferences = do
+    fillBytes p 0 #{size LZ4F_preferences_t} -- set reserved fields to 0 as lz4frame.h requires
     #{poke LZ4F_preferences_t, frameInfo} p $ frameInfo preferences
     #{poke LZ4F_preferences_t, compressionLevel} p $ compressionLevel preferences
     #{poke LZ4F_preferences_t, autoFlush} p $ autoFlush preferences
-    -- Reserved fields must be 0 for forward compatibility,
-    -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L154
-    #{poke LZ4F_preferences_t, reserved[0]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_preferences_t, reserved[1]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_preferences_t, reserved[2]} p $ (0 :: #{type unsigned})
-    #{poke LZ4F_preferences_t, reserved[3]} p $ (0 :: #{type unsigned})
+    -- reserved uint field here, see lz4frame.h
+    -- reserved uint field here, see lz4frame.h
+    -- reserved uint field here, see lz4frame.h
+    -- reserved uint field here, see lz4frame.h
 
 
 data LZ4F_cctx
