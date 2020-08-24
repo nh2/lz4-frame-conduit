@@ -193,6 +193,7 @@ data Preferences = Preferences
   { frameInfo        :: FrameInfo
   , compressionLevel :: Int
   , autoFlush        :: Bool
+  , favorDecSpeed    :: Bool
   }
 
 instance Storable Preferences where
@@ -202,17 +203,19 @@ instance Storable Preferences where
     frameInfo <- #{peek LZ4F_preferences_t, frameInfo} p
     compressionLevel <- #{peek LZ4F_preferences_t, compressionLevel} p
     autoFlush <- #{peek LZ4F_preferences_t, autoFlush} p
+    favorDecSpeed <- #{peek LZ4F_preferences_t, favorDecSpeed} p
     return $ Preferences
       { frameInfo
       , compressionLevel
       , autoFlush
+      , favorDecSpeed
       }
   poke p preferences = do
     fillBytes p 0 #{size LZ4F_preferences_t} -- set reserved fields to 0 as lz4frame.h requires
     #{poke LZ4F_preferences_t, frameInfo} p $ frameInfo preferences
     #{poke LZ4F_preferences_t, compressionLevel} p $ compressionLevel preferences
     #{poke LZ4F_preferences_t, autoFlush} p $ autoFlush preferences
-    -- reserved uint field here, see lz4frame.h
+    #{poke LZ4F_preferences_t, favorDecSpeed} p $ favorDecSpeed preferences -- since lz4 v1.8.2
     -- reserved uint field here, see lz4frame.h
     -- reserved uint field here, see lz4frame.h
     -- reserved uint field here, see lz4frame.h

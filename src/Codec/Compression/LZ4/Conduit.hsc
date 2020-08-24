@@ -251,6 +251,7 @@ lz4DefaultPreferences =
       }
     , compressionLevel = 0
     , autoFlush = False
+    , favorDecSpeed = False
     }
 
 
