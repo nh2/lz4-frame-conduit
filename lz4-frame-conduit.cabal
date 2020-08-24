@@ -1,12 +1,15 @@
 name:                lz4-frame-conduit
 version:             0.1.0.0
-synopsis:            Conduit implementing the official LZ4 frame straming format
-description:         Conduit implementing the official LZ4 frame straming format
+synopsis:            Conduit implementing the official LZ4 frame streaming format
+description:
+  Conduit implementing the official LZ4 frame streaming format.
+  Compatible with the lz4 command line utility.
 homepage:            https://github.com/nh2/lz4-frame-conduit#readme
+bug-reports:         https://github.com/nh2/lz4-frame-conduit/issues
 license:             MIT
 license-file:        LICENSE
 author:              Niklas Hambüchen
-maintainer:          niklas@fpcomplete.com
+maintainer:          mail@nh2.me
 copyright:           2017 Niklas Hambüchen
 category:            Web
 build-type:          Simple
