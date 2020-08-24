@@ -6,11 +6,16 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
+-- | TODO: Implement:
+--
+-- * Block checksumming
+-- * Dictionary support
 module Codec.Compression.LZ4.Conduit
   ( Lz4FrameException(..)
   , BlockSizeID(..)
   , BlockMode(..)
   , ContentChecksum(..)
+  , BlockChecksum(..)
   , FrameType(..)
   , FrameInfo(..)
   , Preferences(..)
@@ -65,7 +70,7 @@ import qualified Language.C.Inline.Context as C
 import qualified Language.C.Inline.Unsafe as CUnsafe
 import           Text.RawString.QQ
 
-import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
+import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), BlockChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
 
 #include "lz4frame.h"
 
@@ -241,6 +246,8 @@ lz4DefaultPreferences =
       , contentChecksumFlag = LZ4F_noContentChecksum
       , frameType = LZ4F_frame
       , contentSize = 0
+      , dictID = 0
+      , blockChecksumFlag = LZ4F_noBlockChecksum
       }
     , compressionLevel = 0
     , autoFlush = False

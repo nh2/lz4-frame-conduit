@@ -8,6 +8,7 @@ module Codec.Compression.LZ4.CTypes
   , BlockSizeID(..)
   , BlockMode(..)
   , ContentChecksum(..)
+  , BlockChecksum(..)
   , FrameType(..)
   , FrameInfo(..)
   , Preferences(..)
@@ -102,6 +103,25 @@ instance Storable ContentChecksum where
     LZ4F_contentChecksumEnabled -> #{const LZ4F_contentChecksumEnabled}
 
 
+data BlockChecksum
+  = LZ4F_noBlockChecksum
+  | LZ4F_blockChecksumEnabled
+  deriving (Eq, Ord, Show)
+
+instance Storable BlockChecksum where
+  sizeOf _ = #{size LZ4F_blockChecksum_t}
+  alignment _ = #{alignment LZ4F_blockChecksum_t}
+  peek p = do
+    n <- peek (castPtr p :: Ptr #{type LZ4F_blockChecksum_t})
+    case n of
+      #{const LZ4F_noBlockChecksum } -> return LZ4F_noBlockChecksum
+      #{const LZ4F_blockChecksumEnabled } -> return LZ4F_blockChecksumEnabled
+      _ -> throwIO $ Lz4FormatException $ "lz4 instance Storable BlockChecksum: encountered unknown LZ4F_blockChecksum_t: " ++ show n
+  poke p mode = poke (castPtr p :: Ptr #{type LZ4F_blockChecksum_t}) $ case mode of
+    LZ4F_noBlockChecksum  -> #{const LZ4F_noBlockChecksum}
+    LZ4F_blockChecksumEnabled -> #{const LZ4F_blockChecksumEnabled}
+
+
 data FrameType
   = LZ4F_frame
   | LZ4F_skippableFrame
@@ -127,7 +147,15 @@ data FrameInfo = FrameInfo
   , contentChecksumFlag :: ContentChecksum
   , frameType           :: FrameType
   , contentSize         :: Word64
+  , dictID              :: Word32 -- ^ @unsigned int@ in @lz4frame.h@, which can be 16 or 32 bits; AFAIK GHC does not run on archs where it is 16-bit, so there's a compile-time check for it.
+  , blockChecksumFlag   :: BlockChecksum
   }
+
+-- See comment on `dictID`.
+$(if #{size unsigned} /= (4 :: Int)
+    then error "sizeof(unsigned) is not 4 (32-bits), the code is not written for this"
+    else pure []
+ )
 
 instance Storable FrameInfo where
   sizeOf _ = #{size LZ4F_frameInfo_t}
@@ -138,22 +166,27 @@ instance Storable FrameInfo where
     contentChecksumFlag <- #{peek LZ4F_frameInfo_t, contentChecksumFlag} p
     frameType <- #{peek LZ4F_frameInfo_t, frameType} p
     contentSize <- #{peek LZ4F_frameInfo_t, contentSize} p
+    dictID <- #{peek LZ4F_frameInfo_t, dictID} p
+    blockChecksumFlag <- #{peek LZ4F_frameInfo_t, blockChecksumFlag} p
     return $ FrameInfo
       { blockSizeID
       , blockMode
       , contentChecksumFlag
       , frameType
       , contentSize
+      , dictID
+      , blockChecksumFlag
       }
   poke p frameInfo = do
-    fillBytes p 0 #{size LZ4F_preferences_t} -- set reserved fields to 0 as lz4frame.h requires
     #{poke LZ4F_frameInfo_t, blockSizeID} p $ blockSizeID frameInfo
     #{poke LZ4F_frameInfo_t, blockMode} p $ blockMode frameInfo
     #{poke LZ4F_frameInfo_t, contentChecksumFlag} p $ contentChecksumFlag frameInfo
     #{poke LZ4F_frameInfo_t, frameType} p $ frameType frameInfo
     #{poke LZ4F_frameInfo_t, contentSize} p $ contentSize frameInfo
-    -- reserved uint field here, see lz4frame.h
-    -- reserved uint field here, see lz4frame.h
+    -- These were reserved fields once; versions of `lz4frame.h` older
+    -- than v1.8.0 will not have them.
+    #{poke LZ4F_frameInfo_t, dictID} p $ dictID frameInfo
+    #{poke LZ4F_frameInfo_t, blockChecksumFlag} p $ blockChecksumFlag frameInfo
 
 
 data Preferences = Preferences
@@ -196,6 +229,7 @@ lz4FrameTypesTable = Map.fromList
   , (C.TypeName "LZ4F_blockSizeID_t", [t| BlockSizeID |])
   , (C.TypeName "LZ4F_blockMode_t", [t| BlockMode |])
   , (C.TypeName "LZ4F_contentChecksum_t", [t| ContentChecksum |])
+  , (C.TypeName "LZ4F_blockChecksum_t", [t| BlockChecksum |])
   , (C.TypeName "LZ4F_frameInfo_t", [t| FrameInfo |])
   , (C.TypeName "LZ4F_frameType_t", [t| FrameType |])
   , (C.TypeName "LZ4F_preferences_t", [t| Preferences |])
