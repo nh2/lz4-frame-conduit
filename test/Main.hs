@@ -51,7 +51,7 @@ main = do
     describe "more reproducing" $ do
 
       it "decompresses 10000 strings" $ do
-        let !strings = prepare $ replicate 10000 "hello"
+        let strings = prepare $ replicate 10000 "hello"
         actual <- runLZ4ToDecompress (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
 
