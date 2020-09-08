@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE PartialTypeSignatures #-}
@@ -602,20 +603,29 @@ decompress = do
   -- and not on the spec of the frame format, but we have no other
   -- choice in this case.
 
+  liftIO $ putStrLn "decompress"
+
   first5Bytes <- CB.take 5
+  liftIO $ putStrLn "before when"
   when (BSL.length first5Bytes /= 5) $ do
     throwString $ "lz4 decompress error: not enough bytes for header; expected 5, got " ++ show (BSL.length first5Bytes)
 
-  let byteFLG = BSL.index first5Bytes 4
+  liftIO $ putStrLn "before index"
+
+  let !byteFLG = BSL.index first5Bytes 4
   let contentSizeBit = testBit byteFLG 3
 
   let numRemainingHeaderBytes
         | contentSizeBit = 2 + 8
         | otherwise      = 2
 
+  liftIO $ putStrLn "before remainingHeaderBytes"
+
   remainingHeaderBytes <- CB.take numRemainingHeaderBytes
 
   let headerBs = BSL.toStrict $ BSL.concat [first5Bytes, remainingHeaderBytes]
+
+  liftIO $ putStrLn "before hit"
 
   headerDecompressSizeHint <- liftIO $ alloca $ \frameInfoPtr -> do
     unsafeUseAsCStringLen headerBs $ \(headerBsPtr, headerBsLen) -> do
@@ -625,18 +635,23 @@ decompress = do
   let dstBufferSizeDefault :: CSize
       dstBufferSizeDefault = 16 * 1024
 
+  liftIO $ putStrLn "before bracketP"
+
   bracketP
     (do
       dstBufferPtr <- malloc
       dstBufferSizePtr <- malloc
       poke dstBufferPtr =<< mallocArray (fromIntegral dstBufferSizeDefault)
       poke dstBufferSizePtr dstBufferSizeDefault
+      liftIO $ putStrLn "bracketP init done"
       return (dstBufferPtr, dstBufferSizePtr)
     )
     (\(dstBufferPtr, dstBufferSizePtr) -> do
+      liftIO $ putStrLn "bracketP cleaning"
       free =<< peek dstBufferPtr
       free dstBufferPtr
       free dstBufferSizePtr
+      liftIO $ putStrLn "bracketP cleaning done"
     )
     $ \(dstBufferPtr, dstBufferSizePtr) -> do
 
@@ -690,3 +705,7 @@ decompress = do
     -- Force resource release here to guarantee memory constantness
     -- of the conduit (and not rely on GC to do it "at some point in the future").
     liftIO $ finalizeForeignPtr (unLz4FrameDecompressionContext ctx)
+
+    liftIO $ putStrLn "after finalizeForeignPtr"
+
+  liftIO $ putStrLn "decompress done"

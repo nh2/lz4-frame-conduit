@@ -1,15 +1,18 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main (main) where
 
+import           Control.Monad (forever)
 import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf)
-import           Control.Monad.IO.Unlift (MonadUnliftIO)
+import           Control.Monad.IO.Unlift (MonadUnliftIO, liftIO)
 import           Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import           Data.Conduit
+import qualified Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Process as CP
 import           Data.List (intersperse)
@@ -37,45 +40,34 @@ main = do
       prepare strings = BSL.toChunks $ BSL.concat $ intersperse " " $ ["BEGIN"] ++ strings ++ ["END"]
 
   hspec $ do
-    describe "bsChunksOf" $ do
-      it "chunks up a string" $ do
-        bsChunksOf 3 "abc123def4567" `shouldBe` ["abc", "123", "def", "456", "7"]
 
-    describe "Compression" $ do
-      it "compresses simple string" $ do
-        let string = "hellohellohellohello"
-        actual <- runCompressToLZ4 (yield string)
-        actual `shouldBe` string
+    describe "reproducing memory error" $ do
 
-      it "compresses 100000 integers" $ do
-        let strings = prepare $ map (BSL8.pack . show) [1..100000 :: Int]
+      it "compresses 1000 strings" $ do
+        let strings = prepare $ replicate 1000 "hello" -- cannot reproduce if `!`ing this
         actual <- runCompressToLZ4 (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
 
-      it "compresses 100000 strings" $ do
-        let strings = prepare $ replicate 100000 "hello"
-        actual <- runCompressToLZ4 (CL.sourceList strings)
-        actual `shouldBe` (BS.concat strings)
+    describe "more reproducing" $ do
 
-    describe "Decompression" $ do
-      it "decompresses simple string" $ do
-        let string = "hellohellohellohello"
-        actual <- runLZ4ToDecompress (yield string)
-        actual `shouldBe` string
-
-      it "decompresses 100000 integers" $ do
-        let strings = prepare $ map (BSL8.pack . show) [1..100000 :: Int]
+      it "decompresses 10000 strings" $ do
+        let !strings = prepare $ replicate 10000 "hello"
         actual <- runLZ4ToDecompress (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
 
-      it "decompresses 100000 strings" $ do
-        let strings = prepare $ replicate 100000 "hello"
-        actual <- runLZ4ToDecompress (CL.sourceList strings)
-        actual `shouldBe` (BS.concat strings)
+    -- describe "reproducing memory error" $ do
 
-    describe "Identity" $ do
-      modifyMaxSize (const 10000) $ it "compress and decompress arbitrary strings"$
-        QC.property $ \string -> QCM.monadicIO $ do
-          let bs = BSL.toChunks $ BSL8.pack string
-          actual <- QCM.run (runConduitRes $ CL.sourceList bs .| compress .| decompress .| CL.consume)
-          QCM.assert(BS.concat bs == BS.concat actual)
+    --   it "test" $ do
+
+    --     forever $ do
+    --       return () :: IO ()
+
+    --       let !strings = prepare $ replicate 1000 "hello"
+    --       actual <- runCompressToLZ4 (CL.sourceList strings)
+    --       actual `shouldBe` (BS.concat strings)
+
+    --       let !strings = prepare $ replicate 10000 "hello"
+    --       actual <- runLZ4ToDecompress (CL.sourceList strings)
+    --       actual `shouldBe` (BS.concat strings)
+
+    --     return ()
