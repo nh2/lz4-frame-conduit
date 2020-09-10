@@ -10,6 +10,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSL8
 import           Data.Conduit
+import           Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Process as CP
 import           Data.List (intersperse)
@@ -57,6 +58,11 @@ main = do
         actual <- runCompressToLZ4 (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
 
+      it "compresses 1MB ByteString" $ do
+        let bs = BS.replicate 100000 42
+        actual <- runCompressToLZ4 (CB.sourceLbs $ BSL.fromStrict bs)
+        actual `shouldBe` bs
+
     describe "Decompression" $ do
       it "decompresses simple string" $ do
         let string = "hellohellohellohello"
@@ -72,6 +78,11 @@ main = do
         let strings = prepare $ replicate 100000 "hello"
         actual <- runLZ4ToDecompress (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
+
+      it "decompresses 1MB ByteString" $ do
+        let bs = BS.replicate 100000 42
+        actual <- runLZ4ToDecompress (CB.sourceLbs $ BSL.fromStrict bs)
+        actual `shouldBe` bs
 
     describe "Identity" $ do
       modifyMaxSize (const 10000) $ it "compress and decompress arbitrary strings"$

@@ -517,7 +517,6 @@ compressWithOutBufferSize bufferSize =
 
               if
                 | written == 0              -> return newRemainingCapacity
-                | writtenInt < BS.length bs -> loopSingleBs newRemainingCapacity (BS.drop writtenInt bs)
                 | otherwise                 -> return newRemainingCapacity
 
     loop (outBufferSize - headerSize)
