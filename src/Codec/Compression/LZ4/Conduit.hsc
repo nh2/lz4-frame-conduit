@@ -73,6 +73,8 @@ import           Text.RawString.QQ
 
 import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), BlockChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
 
+import System.Mem
+
 #include "lz4frame.h"
 
 C.context (C.baseCtx <> C.fptrCtx <> mempty { C.ctxTypesTable = lz4FrameTypesTable })
@@ -604,7 +606,21 @@ decompress = do
 
   liftIO $ putStrLn "decompress"
 
-  first5Bytes <- CB.take 5
+  liftIO performMajorGC
+  liftIO $ putStrLn "after gc"
+  a <- CB.take 1
+  liftIO $ putStrLn "1"
+  b <- CB.take 1
+  liftIO $ putStrLn "2"
+  c <- CB.take 1
+  liftIO $ putStrLn "3"
+  d <- CB.take 1
+  liftIO $ putStrLn "4"
+  e <- CB.take 1
+  liftIO $ putStrLn "5"
+  let first5Bytes = a <> b <> c <> d <> e
+
+  -- first5Bytes <- CB.take 5
   liftIO $ putStrLn "before when"
   when (BSL.length first5Bytes /= 5) $ do
     throwString $ "lz4 decompress error: not enough bytes for header; expected 5, got " ++ show (BSL.length first5Bytes)
