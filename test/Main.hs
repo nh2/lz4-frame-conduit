@@ -54,20 +54,3 @@ main = do
         let strings = prepare $ replicate 10000 "hello"
         actual <- runLZ4ToDecompress (CL.sourceList strings)
         actual `shouldBe` (BS.concat strings)
-
-    -- describe "reproducing memory error" $ do
-
-    --   it "test" $ do
-
-    --     forever $ do
-    --       return () :: IO ()
-
-    --       let !strings = prepare $ replicate 1000 "hello"
-    --       actual <- runCompressToLZ4 (CL.sourceList strings)
-    --       actual `shouldBe` (BS.concat strings)
-
-    --       let !strings = prepare $ replicate 10000 "hello"
-    --       actual <- runLZ4ToDecompress (CL.sourceList strings)
-    --       actual `shouldBe` (BS.concat strings)
-
-    --     return ()

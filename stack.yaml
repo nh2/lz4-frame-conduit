@@ -1,50 +1,18 @@
-# resolver: lts-13.25 # fails
-# resolver: lts-13.26 # fails
-# resolver: lts-13.27 # works
-# resolver: lts-13.28 # works
-# resolver: lts-13.30 # works
-# resolver: lts-14.27 # works
-# resolver: lts-14.23 # works
-# resolver: lts-14.0 # works
 resolver: nightly-2020-09-10 # ghc 8.10.2
-# extra-deps: []
 extra-deps:
   # - typed-process-0.2.5.0
   - conduit-extra-1.3.2 # switching from 1.3.2 to 1.3.3 fixes the crash on lts-13.26
 
-
-extra-path:
-# - /home/niklas/src/ghc/ghc-rtsopt-disable-lazyfree/_build/stage1/bin/
-- /home/niklas/opt/ghc-8.10.2-lz4-memory-error-dwarf/bin
-system-ghc: true
-skip-ghc-check: true
-
-# does NOT segfault with a `quickest` DWARF compiler on ghc commit 35c7451 built with:
-# ./hadrian/build.stack.sh -j --flavour=quickest --configure 'stage1.*.ghc.hs.opts += -g3' 'stage1.*.cabal.configure.opts += --disable-library-stripping --disable-executable-stripping'
-# DOES segfault when built with make and on same commit using:
+# The issue reproduces faster (after less loop iterations,
+# from "within a minute" to "within a second") when I use my own
+# built GHC from the `ghc-8.10` branch (exact commit is 35c7451),
+# with these `make` settings:
 #     BuildFlavour = perf
 #     GhcLibHcOpts += -g3
 #     GhcRtsHcOpts += -g3
-# Then, passing `--no-strip` to stack and compiling my lib+exe with `-g3` makes the crash disappear.
-# Just stripping the exe does not make the crash appear.
-# But removing `--strip` (which also recompiles the lib) makes the crash re-appear.
-# `--no-library-stripping` does not crash.
-# `--no-executable-stripping` does not crash.
-# Both together does not crash.
-# And now removing `--strip` does not crash any more, what the hell.
-# Now removing `-g3` from `ghc-options` makes it crash.
-# Adding `-g3` back avoids the crash.
-# Removing it again, now the crash is very rare
+# which I can enable with the following:
 
-# Should try things like this: https://gitlab.haskell.org/ghc/ghc/-/issues/15038#note_152547
-
-
-
-# setup-info:
-#   ghc:
-#      linux64-custom-dwarf:
-#         8.10.2:
-#            url: "https://downloads.haskell.org/~ghc/8.10.2/ghc-8.10.2-x86_64-deb10-linux-dwarf.tar.xz"
-
-# compiler: ghc-8.10.2
-# ghc-variant: dwarf
+# extra-path:
+# - /home/niklas/opt/ghc-8.10.2-lz4-memory-error-dwarf/bin
+# system-ghc: true
+# skip-ghc-check: true
