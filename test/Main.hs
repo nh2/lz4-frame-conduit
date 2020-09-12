@@ -3,6 +3,7 @@
 module Main (main) where
 
 import           Codec.Compression.LZ4.Conduit (compress, decompress, bsChunksOf)
+import           Control.Monad (when)
 import           Control.Monad.IO.Unlift (MonadUnliftIO)
 import           Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import           Data.ByteString (ByteString)
@@ -34,6 +35,10 @@ runLZ4ToDecompress source = runResourceT $ do
 
 main :: IO ()
 main = do
+  -- Big memory tests are disabled by default to be kind to packagers and CI.
+  let skipBigmemTests = True
+      skipBigmemTest = when skipBigmemTests $ pendingWith "skipped by default due to big RAM requirement"
+
   let prepare :: [BSL.ByteString] -> [ByteString]
       prepare strings = BSL.toChunks $ BSL.concat $ intersperse " " $ ["BEGIN"] ++ strings ++ ["END"]
 
@@ -63,6 +68,12 @@ main = do
         actual <- runCompressToLZ4 (CB.sourceLbs $ BSL.fromStrict bs)
         actual `shouldBe` bs
 
+      it "compresses 5GiB ByteString" $ do -- more than 32-bit many Bytes
+        skipBigmemTest
+        let bs = BS.replicate (5 * 1024*1024*1024) 42
+        actual <- runCompressToLZ4 (CB.sourceLbs $ BSL.fromStrict bs)
+        actual `shouldBe` bs
+
     describe "Decompression" $ do
       it "decompresses simple string" $ do
         let string = "hellohellohellohello"
@@ -81,6 +92,12 @@ main = do
 
       it "decompresses 1MB ByteString" $ do
         let bs = BS.replicate 100000 42
+        actual <- runLZ4ToDecompress (CB.sourceLbs $ BSL.fromStrict bs)
+        actual `shouldBe` bs
+
+      it "decompresses 5GiB ByteString" $ do -- more than 32-bit many Bytes
+        skipBigmemTest
+        let bs = BS.replicate (5 * 1024*1024*1024) 42
         actual <- runLZ4ToDecompress (CB.sourceLbs $ BSL.fromStrict bs)
         actual `shouldBe` bs
 
