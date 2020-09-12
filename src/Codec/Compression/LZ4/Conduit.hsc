@@ -491,33 +491,36 @@ compressWithOutBufferSize bufferSize =
 
             Just bs -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
-              newRemainingCapacity <- foldM (\cap subBs -> loopSingleBs cap subBs) remainingCapacity bss
+              newRemainingCapacity <- foldM compressSingleBs remainingCapacity bss
               loop newRemainingCapacity
 
-        loopSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
-        loopSingleBs remainingCapacity bs
+        compressSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressSingleBs remainingCapacity bs
           | remainingCapacity < compressBound = do
               -- Not enough space in outBuf to guarantee that the next call
               -- to `lz4fCompressUpdate` will fit; so yield (a copy of) the
               -- current outBuf, then it's all free again.
-              outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral (outBufferSize - remainingCapacity))
-              yield outBs
-              loopSingleBs outBufferSize bs
+              yieldOutBuf (outBufferSize - remainingCapacity)
+              compressSingleBsFitting outBufferSize bs
           | otherwise = do
-              written <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
-                let bsLenSize = fromIntegral bsLen
+              compressSingleBsFitting remainingCapacity bs
 
-                -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks]
-                let offset = fromIntegral $ outBufferSize - remainingCapacity
-                withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
+        compressSingleBsFitting :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressSingleBsFitting remainingCapacity bs = do
+          when (remainingCapacity < compressBound) $ error "precondition violated"
 
-              let newRemainingCapacity = remainingCapacity - written
-              -- TODO assert newRemainingCapacity > 0
-              let writtenInt = fromIntegral written
+          written <- liftIO $ unsafeUseAsCStringLen bs $ \(bsPtr, bsLen) -> do
+            let bsLenSize = fromIntegral bsLen
 
-              if
-                | written == 0              -> return newRemainingCapacity
-                | otherwise                 -> return newRemainingCapacity
+            -- See note [Single call to LZ4F_compressUpdate() can create multiple blocks]
+            let offset = fromIntegral $ outBufferSize - remainingCapacity
+            withOutBuf $ \buf -> lz4fCompressUpdate ctx (buf `plusPtr` offset) remainingCapacity bsPtr bsLenSize
+
+          when (written > remainingCapacity) $ do -- sanity check
+            error $ "lz4fCompressUpdate wrote past buffer: " ++ show (written, remainingCapacity)
+
+          let newRemainingCapacity = remainingCapacity - written
+          return newRemainingCapacity
 
     loop (outBufferSize - headerSize)
 
