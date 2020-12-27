@@ -2,6 +2,10 @@
 
 Haskell Conduit implementing the official LZ4 frame streaming format.
 
+## Building
+
+Use `git clone --recursive`, because `lz4/` is a git submodule.
+
 ## Rationale and comparison to non-`lz4`-compatible libraries
 
 There exist two `lz4` formats:
