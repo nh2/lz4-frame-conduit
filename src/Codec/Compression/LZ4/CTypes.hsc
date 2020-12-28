@@ -3,6 +3,17 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+{-|
+Module      : Codec.Compression.LZ4.CTypes
+Description : C type definitions for the lz4 compression codec.
+Copyright   : (c) Niklas Hambüchen, 2020
+License     : MIT
+Maintainer  : mail@nh2.me
+Stability   : stable
+
+-}
+
+
 module Codec.Compression.LZ4.CTypes
   ( Lz4FrameException(..)
   , BlockSizeID(..)
