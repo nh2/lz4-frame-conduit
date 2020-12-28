@@ -6,10 +6,56 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -fno-warn-partial-type-signatures #-}
 
--- | TODO: Implement:
---
--- * Block checksumming
--- * Dictionary support
+{-|
+Module      : Codec.Compression.LZ4.Conduit
+Description : Conduit for the lz4 compression codec.
+Copyright   : (c) Niklas Hambüchen, 2020
+License     : MIT
+Maintainer  : mail@nh2.me
+Stability   : stable
+
+
+Help Wanted / TODOs
+
+Please feel free to send me a pull request for any of the following items:
+
+* TODO Block checksumming
+
+* TODO Dictionary support
+
+* TODO Performance:
+   Write a version of `compress` that emits ByteStrings of known
+   constant length. That will allow us to do compression in a zero-copy
+   fashion, writing compressed bytes directly into a the ByteStrings
+   (e.g using `unsafePackMallocCString` or equivalent).
+   We currently don't do that (instead, use allocaBytes + copying packCStringLen)
+   to ensure that the ByteStrings generated are as compact as possible
+   (for the case that `written < size`), since the current `compress`
+   conduit directly yields the outputs of LZ4F_compressUpdate()
+   (unless they are of 0 length when they are buffered in the context
+   tmp buffer).
+
+* TODO Try enabling checksums, then corrupt a bit and see if lz4c detects it.
+
+* TODO Add `with*` style bracketed functions for creating the
+   LZ4F_createCompressionContext and Lz4FramePreferencesPtr
+   for prompt resource release,
+   in addition to the GC'd variants below.
+   This would replace our use of `finalizeForeignPtr` in the conduit.
+   `finalizeForeignPtr` seems almost as good, but note that it
+   doesn't guarantee prompt resource release on exceptions;
+   a `with*` style function that uses `bracket` does.
+   However, it isn't clear yet which one would be faster
+   (what the cost of `mask` is compared to foreign pointer finalizers).
+   Also note that prompt freeing has side benefits,
+   such as reduced malloc() fragmentation (the closer malloc()
+   and free() are to each other, the smaller is the chance to
+   have malloc()s on top of the our malloc() in the heap,
+   thus the smaller the chance that we cannot decrease the
+   heap pointer upon free() (because "mallocs on top" render
+   heap memory unreturnable to the OS; memory fragmentation).
+-}
+
 module Codec.Compression.LZ4.Conduit
   ( Lz4FrameException(..)
   , BlockSizeID(..)
@@ -167,43 +213,6 @@ freeLz4ScopedCompressionContext (ScopedLz4FrameCompressionContext ctxPtr) = do
   return ()
 
 
-
--- TODO Performance:
---      Write a version of `compress` that emits ByteStrings of known
---      constant length. That will allow us to do compression in a zero-copy
---      fashion, writing compressed bytes directly into a the ByteStrings
---      (e.g using `unsafePackMallocCString` or equivalent).
---      We currently don't do that (instead, use allocaBytes + copying packCStringLen)
---      to ensure that the ByteStrings generated are as compact as possible
---      (for the case that `written < size`), since the current `compress`
---      conduit directly yields the outputs of LZ4F_compressUpdate()
---      (unless they are of 0 length when they are buffered in the context
---      tmp buffer).
-
--- TODO Try enabling checksums, then corrupt a bit and see if lz4c detects it.
-
--- TODO Add `with*` style bracketed functions for creating the
---      LZ4F_createCompressionContext and Lz4FramePreferencesPtr
---      for prompt resource release,
---      in addition to the GC'd variants below.
---      This would replace our use of `finalizeForeignPtr` in the conduit.
---      `finalizeForeignPtr` seems almost as good, but note that it
---      doesn't guarantee prompt resource release on exceptions;
---      a `with*` style function that uses `bracket` does.
---      However, it isn't clear yet which one would be faster
---      (what the cost of `mask` is compared to foreign pointer finalizers).
---      Also note that prompt freeing has side benefits,
---      such as reduced malloc() fragmentation (the closer malloc()
---      and free() are to each other, the smaller is the chance to
---      have malloc()s on top of the our malloc() in the heap,
---      thus the smaller the chance that we cannot decrease the
---      heap pointer upon free() (because "mallocs on top" render
---      heap memory unreturnable to the OS; memory fragmentation).
-
-
--- TODO Turn the above TODO into documentation
-
-
 withScopedLz4fCompressionContext :: (HasCallStack) => (ScopedLz4FrameCompressionContext -> IO a) -> IO a
 withScopedLz4fCompressionContext f =
   bracket
@@ -296,9 +305,9 @@ lz4fCompressBound srcSize (ScopedLz4FramePreferencesPtr prefsPtr) = do
   } |]
 
 
+-- | TODO allow passing in cOptPtr instead of NULL.
 lz4fCompressUpdate :: (HasCallStack) => ScopedLz4FrameCompressionContext -> Ptr CChar -> CSize -> Ptr CChar -> CSize -> IO CSize
 lz4fCompressUpdate (ScopedLz4FrameCompressionContext ctx) destBuf destBufLen srcBuf srcBufLen = do
-  -- TODO allow passing in cOptPtr instead of NULL.
   written <- handleLz4Error [C.block| size_t {
     size_t err_or_written = LZ4F_compressUpdate($(LZ4F_cctx* ctx), $(char* destBuf), $(size_t destBufLen), $(char* srcBuf), $(size_t srcBufLen), NULL);
     return err_or_written;
@@ -306,9 +315,9 @@ lz4fCompressUpdate (ScopedLz4FrameCompressionContext ctx) destBuf destBufLen src
   return written
 
 
+-- | TODO allow passing in cOptPtr instead of NULL.
 lz4fCompressEnd :: (HasCallStack) => ScopedLz4FrameCompressionContext -> Ptr CChar -> CSize -> IO CSize
 lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = do
-  -- TODO allow passing in cOptPtr instead of NULL.
   footerWritten <- handleLz4Error [C.block| size_t {
     size_t err_or_footerWritten = LZ4F_compressEnd($(LZ4F_cctx* ctx), $(char* footerBuf), $(size_t footerBufLen), NULL);
     return err_or_footerWritten;
@@ -316,7 +325,7 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
   return footerWritten
 
 
--- Note [Single call to LZ4F_compressUpdate() can create multiple blocks]
+-- | Note [Single call to LZ4F_compressUpdate() can create multiple blocks]
 -- A single call to LZ4F_compressUpdate() can create multiple blocks,
 -- and handles buffers > 32-bit sizes; see:
 --   https://github.com/lz4/lz4/blob/52cac9a97342641315c76cfb861206d6acd631a8/lib/lz4frame.c#L601
@@ -527,8 +536,7 @@ compressWithOutBufferSize bufferSize =
 
 
 
--- All notes that apply to `haskell_lz4_freeCompressionContext` apply
--- here as well.
+-- | All notes that apply to `haskell_lz4_freeCompressionContext` apply here as well.
 C.verbatim [r|
 void haskell_lz4_freeDecompressionContext(LZ4F_dctx** ctxPtr)
 {
@@ -548,10 +556,9 @@ void haskell_lz4_freeDecompressionContext(LZ4F_dctx** ctxPtr)
 foreign import ccall "&haskell_lz4_freeDecompressionContext" haskell_lz4_freeDecompressionContext :: FunPtr (Ptr (Ptr LZ4F_dctx) -> IO ())
 
 
+-- | All notes that apply to `lz4fCreateCompressonContext` apply here as well.
 lz4fCreateDecompressionContext :: (HasCallStack) => IO Lz4FrameDecompressionContext
 lz4fCreateDecompressionContext = do
-  -- All notes that apply to `lz4fCreateCompressonContext` apply here
-  -- as well.
   ctxForeignPtr :: ForeignPtr (Ptr LZ4F_dctx) <- mallocForeignPtr
   withForeignPtr ctxForeignPtr $ \ptr -> poke ptr nullPtr
 
@@ -576,9 +583,9 @@ lz4fGetFrameInfo (Lz4FrameDecompressionContext ctxForeignPtr) frameInfoPtr srcBu
   return decompressSizeHint
 
 
+-- TODO allow passing in dOptPtr instead of NULL.
 lz4fDecompress :: (HasCallStack) => Lz4FrameDecompressionContext -> Ptr CChar -> Ptr CSize -> Ptr CChar -> Ptr CSize -> IO CSize
 lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr srcBuffer srcSizePtr = do
-  -- TODO allow passing in dOptPtr instead of NULL.
 
   decompressSizeHint <- handleLz4Error [C.block| size_t {
     LZ4F_dctx* ctxPtr = *$fptr-ptr:(LZ4F_dctx** ctxForeignPtr);
@@ -588,6 +595,7 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
   return decompressSizeHint
 
 
+-- | TODO check why decompressSizeHint is always 4
 decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 decompress = do
   ctx <- liftIO lz4fCreateDecompressionContext
