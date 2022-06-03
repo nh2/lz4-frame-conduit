@@ -338,7 +338,8 @@ compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString
 compress = compressWithOutBufferSize 0
 
 -- | Compress the incoming stream of ByteStrings and mark the end of a LZ4 frame with a @Conduit.Flush@.
--- Returns a list of byte offsets that point to the start of each LZ4 frame header.
+-- Returns a list of byte offsets that point to the start of each LZ4 frame header, and the last entry is
+-- the total length of the compressed ByteString.
 --
 -- Multiple LZ4 frames are useful whenever you want to chunk a ByteString into parts that are individually decompressable.
 compressMultiFrame :: (MonadUnliftIO m, MonadResource m) => ConduitT (Flush ByteString) ByteString m [Int]
@@ -354,7 +355,7 @@ compressMultiFrame = do
       modifyIORef' counterRef (BS.length bs +)
       yield bs)
   offsets <- readIORef offsetsRef
-  return (reverse . tail $ offsets)
+  return (reverse offsets)
 
 
 withLz4CtxAndPrefsConduit ::
