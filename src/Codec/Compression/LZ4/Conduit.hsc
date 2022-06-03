@@ -749,7 +749,7 @@ decompress = do
     -- of the conduit (and not rely on GC to do it "at some point in the future").
     liftIO $ finalizeForeignPtr (unLz4FrameDecompressionContext ctx)
 
-    -- | Check if there is another frame to decode.
+    -- Check if there is another frame to decode.
     peekC >>= \case
       Nothing -> return ()
       Just _ -> decompress
