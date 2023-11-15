@@ -1,6 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -69,12 +68,16 @@ module Codec.Compression.LZ4.Conduit
   , lz4DefaultPreferences
 
   , compress
+  , compressMultiFrame
   , compressYieldImmediately
   , compressWithOutBufferSize
+  , compressWithOutBufferSizeMultiFrame
 
   , decompress
+  , decompressChunks
 
   , bsChunksOf
+  , ignoreFlush
 
   -- * Internals
   , Lz4FrameCompressionContext(..)
@@ -90,19 +93,16 @@ module Codec.Compression.LZ4.Conduit
   ) where
 
 import           UnliftIO.Exception (throwString, bracket)
+import           UnliftIO.IORef (newIORef, readIORef, modifyIORef')
+import           Conduit
 import           Control.Monad (foldM, when)
-import           Control.Monad.IO.Unlift (MonadUnliftIO)
-import           Control.Monad.IO.Class (liftIO)
-import           Control.Monad.Trans.Resource (MonadResource)
 import           Data.Bits (testBit)
 import           Data.ByteString (ByteString, packCStringLen)
 import           Data.ByteString.Unsafe (unsafePackCString, unsafeUseAsCStringLen)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BSL
-import           Data.Conduit
 import qualified Data.Conduit.Binary as CB
-import           Data.Monoid ((<>))
 import           Foreign.C.Types (CChar, CSize)
 import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
 import           Foreign.Marshal.Alloc (alloca, allocaBytes, malloc, free)
@@ -333,9 +333,30 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
 -- an arbitrarily large amount of input data, as long as the destination
 -- buffer is large enough.
 
-
+-- |
+-- Compresss the incoming stream of ByteStrings and put it into a single LZ4 frame.
 compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 compress = compressWithOutBufferSize 0
+
+-- | Compress the incoming stream of ByteStrings and mark the end of a LZ4 frame with a @Conduit.Flush@.
+-- Returns a list of byte offsets that point to the start of each LZ4 frame header, and the last entry is
+-- the total length of the compressed ByteString.
+--
+-- Multiple LZ4 frames are useful whenever you want to chunk a ByteString into parts that are individually decompressable.
+compressMultiFrame :: (MonadUnliftIO m, MonadResource m) => ConduitT (Flush ByteString) ByteString m [Int]
+{-# INLINE compressMultiFrame #-}
+compressMultiFrame = do
+  counterRef <- newIORef 0
+  offsetsRef <- newIORef [0]
+  compressWithOutBufferSizeMultiFrame 0 .| awaitForever (\case
+    Flush -> do
+      count <- readIORef counterRef
+      modifyIORef' offsetsRef (count:)
+    Chunk bs -> do
+      modifyIORef' counterRef (BS.length bs +)
+      yield bs)
+  offsets <- readIORef offsetsRef
+  return (reverse offsets)
 
 
 withLz4CtxAndPrefsConduit ::
@@ -455,9 +476,24 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
+
 compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT ByteString ByteString m ()
-compressWithOutBufferSize bufferSize =
+compressWithOutBufferSize bufferSize = Conduit.mapC Chunk .| compressWithOutBufferSizeMultiFrame bufferSize .| ignoreFlush
+
+ignoreFlush :: Monad m => ConduitT (Flush a) a m ()
+ignoreFlush = awaitForever $ \case
+  Chunk a -> yield a
+  Flush -> return ()
+
+data FrameState = EndStream CSize | NewFrame CSize
+
+-- | Compress the incoming stream of ByteStrings and delineate the end of a LZ4 frame with a @Conduit.Flush@.
+compressWithOutBufferSizeMultiFrame :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) (Flush ByteString) m ()
+compressWithOutBufferSizeMultiFrame bufferSize =
   withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
+    -- From the LZ4 manual:
+    --  "A successful call to LZ4F_compressEnd() makes cctx available again for another compression task.""
+    -- Therefore we only need a single compression context (ctx) even though we use it for multiple LZ4 frames.
 
     -- We split any incoming ByteString into chunks of this size, so that
     -- we can pass this size to `lz4fCompressBound` once and reuse a buffer
@@ -469,41 +505,44 @@ compressWithOutBufferSize bufferSize =
 
     outBuf <- liftIO $ mallocForeignPtrBytes (fromIntegral outBufferSize)
     let withOutBuf f = liftIO $ withForeignPtr outBuf f
+
     let yieldOutBuf outBufLen = do
           outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
-          yield outBs
+          yield (Chunk outBs)
 
-    headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
+    let writeHeader = withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
 
     let writeFooterAndYield remainingCapacity = do
-          let offset = fromIntegral $ outBufferSize - remainingCapacity
-          footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) remainingCapacity
-          let outBufLen = outBufferSize - remainingCapacity + footerWritten
-          yieldOutBuf outBufLen
+          let writeFooterToBuffer capacity = do
+                let offset = fromIntegral $ outBufferSize - capacity
+                footerWritten <- withOutBuf $ \buf -> lz4fCompressEnd ctx (buf `plusPtr` offset) capacity
+                let outBufLen = outBufferSize - capacity + footerWritten
+                yieldOutBuf outBufLen
+                yield Flush -- denote the end of a frame.
+
+          -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
+          -- see docs of LZ4F_compressBound() for that.
+          footerSize <- liftIO $ lz4fCompressBound 0 prefs
+
+          if remainingCapacity >= footerSize
+            then do
+              writeFooterToBuffer remainingCapacity
+            else do
+              -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
+              yieldOutBuf (outBufferSize - remainingCapacity)
+              writeFooterToBuffer outBufferSize
 
     let loop remainingCapacity = do
           await >>= \case
-            Nothing -> do
-              -- Done, write footer.
+            Nothing -> return $ EndStream remainingCapacity
+            Just (Flush) -> return $ NewFrame remainingCapacity
 
-              -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
-              -- see docs of LZ4F_compressBound() for that.
-              footerSize <- liftIO $ lz4fCompressBound 0 prefs
-
-              if remainingCapacity >= footerSize
-                then do
-                  writeFooterAndYield remainingCapacity
-                else do
-                  -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
-                  yieldOutBuf (outBufferSize - remainingCapacity)
-                  writeFooterAndYield outBufferSize
-
-            Just bs -> do
+            Just (Chunk bs) -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
               newRemainingCapacity <- foldM compressSingleBs remainingCapacity bss
               loop newRemainingCapacity
 
-        compressSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressSingleBs :: CSize -> ByteString -> ConduitM i (Flush ByteString) m CSize
         compressSingleBs remainingCapacity bs
           | remainingCapacity < compressBound = do
               -- Not enough space in outBuf to guarantee that the next call
@@ -514,7 +553,7 @@ compressWithOutBufferSize bufferSize =
           | otherwise = do
               compressSingleBsFitting remainingCapacity bs
 
-        compressSingleBsFitting :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressSingleBsFitting :: CSize -> ByteString -> ConduitM i (Flush ByteString) m CSize
         compressSingleBsFitting remainingCapacity bs = do
           when (remainingCapacity < compressBound) $ error "precondition violated"
 
@@ -531,7 +570,16 @@ compressWithOutBufferSize bufferSize =
           let newRemainingCapacity = remainingCapacity - written
           return newRemainingCapacity
 
-    loop (outBufferSize - headerSize)
+    let writeFrame = do
+          headerSize <- writeHeader
+          status <- loop (outBufferSize - headerSize)
+          case status of
+            EndStream capacity -> writeFooterAndYield capacity
+            NewFrame capacity -> Conduit.peekC >>= \case  -- Only create a new frame if there's still data left.
+              Nothing -> writeFooterAndYield capacity
+              Just _ -> writeFooterAndYield capacity >> writeFrame
+
+    writeFrame
 
 
 
@@ -594,10 +642,13 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
   } |]
   return decompressSizeHint
 
-
--- | TODO check why decompressSizeHint is always 4
 decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-decompress = do
+decompress = decompressChunks .| ignoreFlush
+
+-- | Decompress a ByteString that uses the LZ4 frame format (both single and multiple frames).
+-- TODO check why decompressSizeHint is always 4
+decompressChunks :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString (Flush ByteString) m ()
+decompressChunks = do
   ctx <- liftIO lz4fCreateDecompressionContext
 
   -- OK, now here it gets a bit ugly.
@@ -659,7 +710,7 @@ decompress = do
             poke dstBufferSizePtr size
           peek dstBufferPtr
 
-    let loopSingleBs :: CSize -> ByteString -> _
+    let loopSingleBs :: (MonadIO m) => CSize -> ByteString -> ConduitT i (Flush ByteString) m CSize
         loopSingleBs decompressSizeHint bs = do
           (outBs, srcRead, newDecompressSizeHint) <- liftIO $
             unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
@@ -677,7 +728,10 @@ decompress = do
                   outBs <- packCStringLen (dstBuffer, fromIntegral dstWritten)
                   return (outBs, srcRead, newDecompressSizeHint)
 
-          yield outBs
+          yield (Chunk outBs)
+          -- When a frame is fully decoded, LZ4F_decompress returns 0 (no more data expected),
+          -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L324
+          when (newDecompressSizeHint == 0) $ yield Flush
 
           let srcReadInt = fromIntegral srcRead
           if
@@ -700,3 +754,8 @@ decompress = do
     -- Force resource release here to guarantee memory constantness
     -- of the conduit (and not rely on GC to do it "at some point in the future").
     liftIO $ finalizeForeignPtr (unLz4FrameDecompressionContext ctx)
+
+    -- Check if there is another frame to decode.
+    peekC >>= \case
+      Nothing -> return ()
+      Just _ -> decompressChunks
