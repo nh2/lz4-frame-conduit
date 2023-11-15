@@ -74,6 +74,7 @@ module Codec.Compression.LZ4.Conduit
   , compressWithOutBufferSizeMultiFrame
 
   , decompress
+  , decompressChunks
 
   , bsChunksOf
   , ignoreFlush
@@ -641,11 +642,13 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
   } |]
   return decompressSizeHint
 
+decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
+decompress = decompressChunks .| ignoreFlush
 
 -- | Decompress a ByteString that uses the LZ4 frame format (both single and multiple frames).
 -- TODO check why decompressSizeHint is always 4
-decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-decompress = do
+decompressChunks :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString (Flush ByteString) m ()
+decompressChunks = do
   ctx <- liftIO lz4fCreateDecompressionContext
 
   -- OK, now here it gets a bit ugly.
@@ -707,7 +710,7 @@ decompress = do
             poke dstBufferSizePtr size
           peek dstBufferPtr
 
-    let loopSingleBs :: (MonadIO m) => CSize -> ByteString -> ConduitT i ByteString m CSize
+    let loopSingleBs :: (MonadIO m) => CSize -> ByteString -> ConduitT i (Flush ByteString) m CSize
         loopSingleBs decompressSizeHint bs = do
           (outBs, srcRead, newDecompressSizeHint) <- liftIO $
             unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
@@ -725,7 +728,10 @@ decompress = do
                   outBs <- packCStringLen (dstBuffer, fromIntegral dstWritten)
                   return (outBs, srcRead, newDecompressSizeHint)
 
-          yield outBs
+          yield (Chunk outBs)
+          -- When a frame is fully decoded, LZ4F_decompress returns 0 (no more data expected),
+          -- see https://github.com/lz4/lz4/blob/7cf0bb97b2a988cb17435780d19e145147dd9f70/lib/lz4frame.h#L324
+          when (newDecompressSizeHint == 0) $ yield Flush
 
           let srcReadInt = fromIntegral srcRead
           if
@@ -752,4 +758,4 @@ decompress = do
     -- Check if there is another frame to decode.
     peekC >>= \case
       Nothing -> return ()
-      Just _ -> decompress
+      Just _ -> decompressChunks
