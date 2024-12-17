@@ -1,10 +1,2 @@
-resolver: lts-13.26
-extra-deps:
-# TODO: Remove all of the below when we are on a resolver that has hspec >= 2.7.2
-#       which fixes slow failure diffs, see https://github.com/hspec/hspec/issues/415.
-- hspec-2.7.4
-- hspec-core-2.7.4
-- hspec-discover-2.7.4
-- QuickCheck-2.14.1
-- random-1.2.0
-- splitmix-0.1.0.1
+resolver: lts-23.0
+extra-deps: []

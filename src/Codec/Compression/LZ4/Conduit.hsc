@@ -1,6 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiWayIf #-}
-{-# LANGUAGE PartialTypeSignatures #-}
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -596,7 +595,7 @@ lz4fDecompress (Lz4FrameDecompressionContext ctxForeignPtr) dstBuffer dstSizePtr
 
 
 -- | TODO check why decompressSizeHint is always 4
-decompress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
+decompress :: forall m . (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 decompress = do
   ctx <- liftIO lz4fCreateDecompressionContext
 
@@ -659,7 +658,7 @@ decompress = do
             poke dstBufferSizePtr size
           peek dstBufferPtr
 
-    let loopSingleBs :: CSize -> ByteString -> _
+    let loopSingleBs :: CSize -> ByteString -> ConduitT ByteString ByteString m CSize
         loopSingleBs decompressSizeHint bs = do
           (outBs, srcRead, newDecompressSizeHint) <- liftIO $
             unsafeUseAsCStringLen bs $ \(srcBuffer, srcSize) -> do
