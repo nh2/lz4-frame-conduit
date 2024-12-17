@@ -1,3 +1,7 @@
+# 0.1.0.2
+
+* GHC 9.8.4 compatibility.
+
 # 0.1.0.1
 
 * Fix incorrect compression logic (compressing input Bytes repeatedly).
