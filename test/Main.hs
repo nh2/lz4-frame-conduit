@@ -15,10 +15,12 @@ import           Data.Conduit.Binary as CB
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Process as CP
 import           Data.List (intersperse)
+import           Data.Maybe (isJust)
 import           Test.Hspec
 import           Test.Hspec.QuickCheck (modifyMaxSize)
 import qualified Test.QuickCheck as QC
 import qualified Test.QuickCheck.Monadic as QCM
+import           System.Directory (findExecutable)
 
 
 
@@ -42,12 +44,20 @@ main = do
   let prepare :: [BSL.ByteString] -> [ByteString]
       prepare strings = BSL.toChunks $ BSL.concat $ intersperse " " $ ["BEGIN"] ++ strings ++ ["END"]
 
+  lz4ExeExists <- isJust <$> findExecutable "lz4"
+
+  let describe_with_lz4 :: HasCallStack => String -> SpecWith a -> SpecWith a
+      describe_with_lz4 label spec =
+        (if lz4ExeExists then id else before_ (pendingWith "lz4 executable missing")) $
+          describe label spec
+
   hspec $ do
+
     describe "bsChunksOf" $ do
       it "chunks up a string" $ do
         bsChunksOf 3 "abc123def4567" `shouldBe` ["abc", "123", "def", "456", "7"]
 
-    describe "Compression" $ do
+    describe_with_lz4 "Compression" $ do
       it "compresses simple string" $ do
         let string = "hellohellohellohello"
         actual <- runCompressToLZ4 (yield string)
@@ -74,7 +84,7 @@ main = do
         actual <- runCompressToLZ4 (CB.sourceLbs $ BSL.fromStrict bs)
         actual `shouldBe` bs
 
-    describe "Decompression" $ do
+    describe_with_lz4 "Decompression" $ do
       it "decompresses simple string" $ do
         let string = "hellohellohellohello"
         actual <- runLZ4ToDecompress (yield string)

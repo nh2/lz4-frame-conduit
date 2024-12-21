@@ -77,6 +77,7 @@ test-suite lz4-frame-conduit-test
                      , bytestring
                      , conduit
                      , conduit-extra
+                     , directory
                      , hspec
                      , resourcet
                      , unliftio-core
